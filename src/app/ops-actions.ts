@@ -6,6 +6,7 @@
  */
 import { fromUuid, toUuid, uuidv7 } from "@nearpay-internal/ids";
 import type { Operator } from "../domain/ops-approval/approval.js";
+import type { OpsActionDetails } from "../infra/db/schema.js";
 import { type Compliance, dbNow, emitEvent, type Tx } from "./context.js";
 
 export interface OpsActionInput {
@@ -16,6 +17,11 @@ export interface OpsActionInput {
   readonly approvalUuid?: string | null;
   /** Internal note kept (encrypted) in `ops_actions` only; never published. */
   readonly note?: string;
+  /**
+   * Internal structured details kept in `ops_actions.details` only; never published (e.g. the blocklist
+   * subject and chain, so the audit trail names what an entry was about — audit finding 10).
+   */
+  readonly details?: OpsActionDetails;
 }
 
 /** Actor string stored on Stage 1 tables (`decided_by`, `case_events.actor`, …) for an operator. */
@@ -36,6 +42,7 @@ export async function recordOpsAction(c: Compliance, tx: Tx, op: Operator, a: Op
       account_id: a.accountUuid,
       approval_id: a.approvalUuid ?? null,
       note_enc: a.note ? c.cipher.encrypt(a.note, `ops_action:${id}`) : null,
+      details: a.details ? JSON.stringify(a.details) : null,
       created_at: now,
     })
     .execute();

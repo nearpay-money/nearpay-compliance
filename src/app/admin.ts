@@ -150,10 +150,14 @@ async function writeBlocklistEntry(
     reason: i.reason,
     created_by: i.actor,
   });
+  // the natural key is unique among active entries only (partial index `blocklist_active`, 0003)
   const row = await (mode === "create"
-    ? q.onConflict((oc) => oc.columns(["subject_type", "subject"]).doNothing())
+    ? q.onConflict((oc) => oc.columns(["subject_type", "subject"]).where("removed_at", "is", null).doNothing())
     : q.onConflict((oc) =>
-        oc.columns(["subject_type", "subject"]).doUpdateSet({ reason: i.reason, created_by: i.actor }),
+        oc
+          .columns(["subject_type", "subject"])
+          .where("removed_at", "is", null)
+          .doUpdateSet({ reason: i.reason, created_by: i.actor }),
       )
   )
     .returningAll()
@@ -192,20 +196,32 @@ export async function addToBlocklist(
   });
 }
 
-/** Ops CLI `blocklist-remove`. */
+/** The blocklist subject as recorded in `ops_actions.details` (internal; never published). */
+const subjectDetails = (r: { subject_type: string; subject: string; chain: string | null }) => ({
+  subject_type: r.subject_type,
+  subject: r.subject,
+  chain: r.chain,
+});
+
+/**
+ * Ops CLI `blocklist-remove`: a soft delete (audit finding 10) — the entry keeps its subject, chain and
+ * reason, and records who removed it and why; it no longer screens.
+ */
 export async function removeFromBlocklist(
   c: Compliance,
-  subjectType: "address" | "near_account",
-  subject: string,
-  chain?: string,
+  i: { subjectType: "address" | "near_account"; subject: string; chain?: string; actor: string; note?: string },
 ) {
-  const { norm } = blocklistSubject(subjectType, subject, chain);
-  const r = await c.db
-    .deleteFrom("blocklist")
-    .where("subject_type", "=", subjectType)
-    .where("subject", "=", norm)
-    .executeTakeFirst();
-  return { removed: Number(r.numDeletedRows) };
+  const { norm } = blocklistSubject(i.subjectType, i.subject, i.chain);
+  return withTx(c.db, async (tx) => {
+    const r = await tx
+      .updateTable("blocklist")
+      .set({ removed_at: await dbNow(tx), removed_by: i.actor, removal_note: i.note ?? null })
+      .where("subject_type", "=", i.subjectType)
+      .where("subject", "=", norm)
+      .where("removed_at", "is", null)
+      .executeTakeFirst();
+    return { removed: Number(r.numUpdatedRows) };
+  });
 }
 
 type BlocklistRow = {
@@ -243,7 +259,7 @@ export async function listOpsBlocklist(
   },
   url: string,
 ): Promise<Page<ReturnType<typeof renderBlocklistEntry>>> {
-  let q = c.db.selectFrom("blocklist").selectAll();
+  let q = c.db.selectFrom("blocklist").selectAll().where("removed_at", "is", null);
   if (f.subject_type) q = q.where("subject_type", "=", f.subject_type);
   if (f.subject) {
     let norm = f.subject.trim();
@@ -289,21 +305,27 @@ export async function addOpsBlocklistEntry(
       target: { type: "blocklist_entry", id: fromUuid("bl", row.id) },
       accountUuid: null,
       note: i.reason,
+      details: subjectDetails(row),
     });
     return renderBlocklistEntry(row);
   });
 }
 
 /**
- * `removeOpsBlocklistEntry` (ops_admin, step-up). Destinations already disabled by a hit stay disabled;
+ * `removeOpsBlocklistEntry` (ops_admin, step-up). A soft delete (audit finding 10, INV-9): the entry keeps
+ * its subject, chain and reason with `removed_at/removed_by/removal_note`, and the operator action records
+ * the subject in its internal details, so the trail always says which address was un-blocked. An already
+ * removed entry is `404` like an unknown one. Destinations already disabled by a hit stay disabled;
  * sanctions-list entries are not blocklist entries and cannot be removed here.
  */
 export async function removeOpsBlocklistEntry(c: Compliance, op: Operator, entryId: string, reason: string) {
   if (!isId("bl", entryId)) throw ApiError.invalid(`${entryId} is not a blocklist entry id`, "id");
   await withTx(c.db, async (tx) => {
     const row = await tx
-      .deleteFrom("blocklist")
+      .updateTable("blocklist")
+      .set({ removed_at: await dbNow(tx), removed_by: operatorActor(op), removal_note: reason })
       .where("id", "=", toUuid(entryId, "bl"))
+      .where("removed_at", "is", null)
       .returningAll()
       .executeTakeFirst();
     if (!row) throw ApiError.missing("blocklist_entry", entryId, "id");
@@ -312,6 +334,7 @@ export async function removeOpsBlocklistEntry(c: Compliance, op: Operator, entry
       target: { type: "blocklist_entry", id: entryId },
       accountUuid: null,
       note: reason,
+      details: subjectDetails(row),
     });
     c.log.warn({ entry: entryId, operator: op.sub }, "blocklist entry removed");
   });

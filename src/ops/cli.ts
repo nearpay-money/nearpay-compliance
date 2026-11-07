@@ -29,7 +29,7 @@ export const USAGE = `usage: ops.js <command> [arguments] [--actor <name>]
   case-close <case_…> --resolution <text>
   case-note <case_…> --note <text>
   blocklist-add address|near_account <subject> [--chain <chain>] --reason <text>
-  blocklist-remove address|near_account <subject> [--chain <chain>]
+  blocklist-remove address|near_account <subject> [--chain <chain>] [--reason <text>]
   account-suspend <acct_…> --reason <text>      (NP_ENV local/test only; elsewhere the console)
   account-reinstate <acct_…> --reason <text>
   geo-policy
@@ -168,7 +168,13 @@ export async function runOps(argv: readonly string[], c: Compliance, deps: OpsDe
       }
       case "blocklist-remove": {
         const subjectType = oneOf(args[0], BLOCKLIST_TYPES, "subject type");
-        const r = await removeFromBlocklist(c, subjectType, need(args[1], "subject"), v.chain);
+        const r = await removeFromBlocklist(c, {
+          subjectType,
+          subject: need(args[1], "subject"),
+          ...(v.chain ? { chain: v.chain } : {}),
+          actor,
+          ...(v.reason ? { note: v.reason } : {}),
+        });
         c.log.warn({ subject_type: subjectType, actor, removed: r.removed }, "blocklist entry removed");
         print(r);
         return 0;
