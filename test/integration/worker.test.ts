@@ -14,9 +14,10 @@ import {
   internalSettlementDestination,
 } from "@nearpay-internal/testing";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { addToBlocklist, setAccountSuspended, setGeoPolicy } from "../../src/app/admin.js";
+import { addToBlocklist, createOpsRescreen, setAccountSuspended, setGeoPolicy } from "../../src/app/admin.js";
 import { listCases, updateCase } from "../../src/app/cases.js";
-import { decideKyb } from "../../src/app/kyb.js";
+import { decideKyb, submitKyb, updateKybProfile } from "../../src/app/kyb.js";
+import { createSuspensionRequest } from "../../src/app/suspension.js";
 import { rescreenDestinations } from "../../src/workers/jobs.js";
 import { CLEAN_EVM, eventually, LISTED_EVM, type Stack, startStack } from "../support/stack.js";
 
@@ -48,6 +49,7 @@ describe("evt.identity.account.created", () => {
       s.admin.db.selectFrom("kyb_cases").selectAll().where("account_id", "=", toUuid(a.id, "acct")).executeTakeFirst(),
     );
     expect(row.status).toBe("not_started");
+    expect(row.account_display_name).toBe(a.display_name);
     await eventually(async () => {
       const n = await s.admin.db.selectFrom("inbox").select("event_id").where("event_id", "=", e.id).execute();
       return n.length === 1;
@@ -197,6 +199,22 @@ describe("post-screening after settlement (LLD §6, §12)", () => {
 });
 
 describe("holds and audit findings", () => {
+  it("a review of an execution carries its payment intent (Execution.reference, Stage 2)", async () => {
+    const pi = newId("pi");
+    const x = execution({
+      livemode: true,
+      state: "held",
+      held_reason: "evidence_timeout",
+      reference: { payment_intent: pi, payment_attempt: null, refund: null, refund_leg: null },
+    } as never);
+    await s.publishEvent(domainEvent("evt.rails.execution.held", x, { livemode: true }));
+    const opened = await probe.next(
+      "evt.compliance.review.opened",
+      (ev) => (ev.data.object as { subject: { id: string } }).subject.id === x.id,
+    );
+    expect(opened.data.object).toMatchObject({ reason: "held_execution", payment_intent: pi });
+  });
+
   it("a held execution opens a held_execution review", async () => {
     const x = execution({ livemode: true, state: "held", held_reason: "evidence_timeout" });
     await s.publishEvent(domainEvent("evt.rails.execution.held", x, { livemode: true }));
@@ -291,6 +309,48 @@ describe("events compliance produces reach the bus (outbox relay)", () => {
   });
 });
 
+describe("Stage 2 events reach the bus", () => {
+  it("kyb.submitted, account.action_requested and ops_action.recorded (ids only)", async () => {
+    const acct = newId("acct");
+    const owner = newId("usr");
+    await updateKybProfile(
+      s.compliance,
+      acct,
+      {
+        legal_name: "Bus Test Ltd",
+        country_of_incorporation: "DE",
+        registration_number: "HRB 1",
+        business_type: "company",
+        business_address: { line1: "Hauptstr. 1", city: "Berlin", country: "DE" },
+        representative: { name: "Max Muster", title: "Geschäftsführer" },
+        expected_monthly_volume: "10k_to_100k",
+      },
+      `user:${owner}`,
+    );
+    await submitKyb(s.compliance, acct, owner);
+    const sub = await probe.next("evt.compliance.kyb.submitted", (e) => e.aggregate.id === acct);
+    expect(sub.data.object).toMatchObject({ account_id: acct, status: "pending" });
+    expect(JSON.stringify(sub)).not.toContain("Bus Test");
+
+    const op = { sub: newId("usr"), role: "ops" as const };
+    const req = await createSuspensionRequest(s.compliance, op, acct, "suspend", "chargeback ring");
+    const requested = await probe.next("evt.compliance.account.action_requested", (e) => e.aggregate.id === req.id);
+    expect(requested.data.object).toMatchObject({ id: req.id, status: "pending", action: "account.suspend" });
+    const action = await probe.next(
+      "evt.compliance.ops_action.recorded",
+      (e) => (e.data.object as { approval: string | null }).approval === req.id,
+    );
+    expect(action.data.object).toMatchObject({
+      actor: { sub: op.sub, ops_role: "ops" },
+      action: "ops_approval.requested",
+      target: { type: "ops_approval", id: req.id },
+      account_id: acct,
+    });
+    expect(action.aggregate.type).toBe("ops_action");
+    expect(JSON.stringify(action)).not.toContain("chargeback");
+  });
+});
+
 describe("blocking destinations", () => {
   const monitor = async (address: string, livemode = true) => {
     const d = internalSettlementDestination({
@@ -356,6 +416,29 @@ describe("blocking destinations", () => {
     expect(again.blocked).toBe(0);
     expect(await casesFor(d.id)).toHaveLength(1);
   });
+
+  it("a console re-screen job runs for one account only", async () => {
+    const addr = "0x6767676767676767676767676767676767676767";
+    const mine = await monitor(addr);
+    await s.admin.db
+      .insertInto("sanctions_entries")
+      .values({ chain_family: "evm", address_norm: addr, source: "ofac_sdn", currency: "ETH" })
+      .execute();
+    const op = { sub: newId("usr"), role: "ops" as const };
+    const other = await createOpsRescreen(s.compliance, op, newId("acct"));
+    expect(other.destinations).toBe(0);
+    const r = await createOpsRescreen(s.compliance, op, mine.account);
+    expect(r.destinations).toBe(1);
+    await probe.next("evt.compliance.destination.blocked", (e) => e.aggregate.id === mine.id);
+    await eventually(async () => {
+      const j = await s.admin.db
+        .selectFrom("jobs")
+        .select("done_at")
+        .where("id", "=", toUuid(r.job_id, "job"))
+        .executeTakeFirstOrThrow();
+      return j.done_at !== null;
+    });
+  });
 });
 
 describe("recurring jobs", () => {
@@ -363,12 +446,19 @@ describe("recurring jobs", () => {
     const rows = await eventually(async () => {
       const r = await s.admin.db.selectFrom("jobs").select(["kind", "dedupe_key", "done_at"]).execute();
       const kinds = new Set(r.filter((j) => j.done_at).map((j) => j.kind));
-      return ["sanctions.refresh", "destinations.rescreen", "purge.screenings", "kit.purge"].every((k) => kinds.has(k))
+      return [
+        "sanctions.refresh",
+        "destinations.rescreen",
+        "purge.screenings",
+        "ops_approvals.expire",
+        "kit.purge",
+      ].every((k) => kinds.has(k))
         ? r
         : null;
     }, 20_000);
-    for (const k of ["sanctions.refresh", "destinations.rescreen", "purge.screenings"])
-      expect(rows.filter((j) => j.kind === k)).toHaveLength(1);
+    // console re-screens (`createOpsRescreen`) are extra jobs with their own dedupe keys
+    for (const k of ["sanctions.refresh", "destinations.rescreen", "purge.screenings", "ops_approvals.expire"])
+      expect(rows.filter((j) => j.kind === k && !j.dedupe_key?.includes(":ops:"))).toHaveLength(1);
   });
 
   it("purge.screenings deletes screenings past the policy retention", async () => {

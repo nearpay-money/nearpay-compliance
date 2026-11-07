@@ -177,7 +177,7 @@ describe("POST /internal/screenings", () => {
         account_id: toUuid(acct, "acct"),
         context: "destination",
         livemode: true,
-        provider: "local_list",
+        provider: "local",
       });
     });
 
@@ -220,19 +220,21 @@ describe("KYB", () => {
     await s.admin.db.transaction().execute((tx) => createKybCase(tx, acct));
   });
 
-  it("the owner starts KYB: not_started → pending; repeating returns the case unchanged", async () => {
+  it("the owner starts KYB: returns the case, which stays not_started until the details are submitted", async () => {
     const token = await sessionToken(acct);
     const r = await s.call("POST", "/v1/account/kyb", { body: {}, token });
     expect(r.status).toBe(200);
-    expect(r.body).toEqual({ object: "kyb_case", status: "pending", vendor_flow_url: null });
-    expect((await s.call("POST", "/v1/account/kyb", { body: {}, token })).body).toMatchObject({ status: "pending" });
+    expect(r.body).toMatchObject({ object: "kyb_case", status: "not_started", vendor_flow_url: null, editable: true });
+    expect((await s.call("POST", "/v1/account/kyb", { body: {}, token })).body).toMatchObject({
+      status: "not_started",
+    });
     const transitions = await s.admin.db
       .selectFrom("kyb_case_transitions")
       .innerJoin("kyb_cases", "kyb_cases.id", "kyb_case_transitions.kyb_case_id")
       .select(["from_state", "to_state", "actor"])
       .where("kyb_cases.account_id", "=", toUuid(acct, "acct"))
       .execute();
-    expect(transitions).toEqual([{ from_state: "not_started", to_state: "pending", actor: "user:usr_owner" }]);
+    expect(transitions).toEqual([]);
   });
 
   it("honours Idempotency-Key on start", async () => {
@@ -251,7 +253,14 @@ describe("KYB", () => {
   it("starting KYB for an account without a case creates it (account.created not consumed yet)", async () => {
     const other = newId("acct");
     const r = await s.call("POST", "/v1/account/kyb", { body: {}, token: await sessionToken(other) });
-    expect(r.body).toMatchObject({ status: "pending" });
+    expect(r.body).toMatchObject({ status: "not_started" });
+    expect(
+      await s.admin.db
+        .selectFrom("kyb_cases")
+        .select("id")
+        .where("account_id", "=", toUuid(other, "acct"))
+        .executeTakeFirst(),
+    ).toBeDefined();
   });
 
   it("the ops decision records the actor and emits evt.compliance.kyb.<decision> once", async () => {

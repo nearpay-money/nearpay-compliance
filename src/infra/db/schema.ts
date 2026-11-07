@@ -1,4 +1,4 @@
-/** Kysely table types (migrations/0001_compliance.sql). */
+/** Kysely table types (migrations/0001_compliance.sql, 0002_stage2_console.sql). */
 import type { ColumnType, Generated, KitTables } from "@nearpay-internal/db";
 
 type Timestamp = ColumnType<Date, Date | string | undefined, Date | string>;
@@ -39,6 +39,8 @@ export interface BlocklistTable {
   reason: string;
   created_by: string;
   created_at: Timestamp;
+  id: Generated<string>;
+  chain: ColumnType<string | null, string | null | undefined, string | null>;
 }
 
 export interface ScreeningsTable {
@@ -56,6 +58,7 @@ export interface ScreeningsTable {
   post_screen_required: Generated<boolean>;
   expires_at: Timestamp;
   created_at: Timestamp;
+  requested_by: ColumnType<string | null, string | null | undefined, string | null>;
 }
 
 export interface KybCasesTable {
@@ -71,6 +74,11 @@ export interface KybCasesTable {
   decided_at: NullableTimestamp;
   updated_at: Timestamp;
   version: Generated<number>;
+  profile_enc: ColumnType<Buffer | null, Buffer | null | undefined, Buffer | null>;
+  declared_by: ColumnType<string | null, string | null | undefined, string | null>;
+  requested_info: ColumnType<string | null, string | null | undefined, string | null>;
+  submitted_at: NullableTimestamp;
+  account_display_name: ColumnType<string | null, string | null | undefined, string | null>;
 }
 
 export interface KybCaseTransitionsTable {
@@ -96,6 +104,8 @@ export interface CasesTable {
   created_at: Timestamp;
   closed_at: NullableTimestamp;
   version: Generated<number>;
+  assignee: ColumnType<string | null, string | null | undefined, string | null>;
+  payment_intent: ColumnType<string | null, string | null | undefined, string | null>;
 }
 
 export interface CaseEventsTable {
@@ -130,6 +140,39 @@ export interface AccountFlagsTable {
   updated_at: Timestamp;
 }
 
+export interface OpsApprovalsTable {
+  id: string;
+  action: "account.suspend" | "account.reinstate";
+  account_id: string;
+  reason: string;
+  status: "pending" | "approved" | "rejected" | "expired";
+  requested_by: string;
+  requested_role: "ops" | "ops_admin";
+  requested_at: Timestamp;
+  decided_by: ColumnType<string | null, string | null | undefined, string | null>;
+  decided_role: ColumnType<
+    "ops" | "ops_admin" | null,
+    "ops" | "ops_admin" | null | undefined,
+    "ops" | "ops_admin" | null
+  >;
+  decided_at: NullableTimestamp;
+  decision_note: ColumnType<string | null, string | null | undefined, string | null>;
+  expires_at: Timestamp;
+}
+
+export interface OpsActionsTable {
+  id: string;
+  actor_sub: string;
+  actor_role: "ops" | "ops_admin";
+  action: string;
+  target_type: string;
+  target_id: string;
+  account_id: string | null;
+  approval_id: string | null;
+  note_enc: Buffer | null;
+  created_at: Timestamp;
+}
+
 export interface ComplianceTables {
   policies: PoliciesTable;
   sanctions_entries: SanctionsEntriesTable;
@@ -142,6 +185,8 @@ export interface ComplianceTables {
   case_events: CaseEventsTable;
   monitored_destinations: MonitoredDestinationsTable;
   account_flags: AccountFlagsTable;
+  ops_approvals: OpsApprovalsTable;
+  ops_actions: OpsActionsTable;
 }
 
 export type DB = ComplianceTables & KitTables;

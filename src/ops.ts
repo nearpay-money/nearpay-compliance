@@ -6,6 +6,7 @@ import { hostname } from "node:os";
 import { createDb, createEnvelopeCipher, parseKek } from "@nearpay-internal/db";
 import { ConfigError, createLogger } from "@nearpay-internal/service";
 import { noMetrics } from "./app/context.js";
+import { screeningProvider } from "./app/services.js";
 import { readOpsConfig } from "./config.js";
 import type { DB } from "./infra/db/schema.js";
 import { runOps } from "./ops/cli.js";
@@ -27,9 +28,11 @@ try {
           destination: process.stderr,
         }),
         metrics: noMetrics,
-        screeningVendor: config.screeningVendor,
+        provider: screeningProvider(config.screeningProvider),
+        opsApprovalTtlSeconds: config.opsApprovalTtlSeconds,
       },
       {
+        env: config.env,
         actor: config.opsActor ?? `cli@${hostname()}`,
         sanctions: { source: config.sanctionsSourceUrl, timeoutMs: config.sanctionsTimeoutMs },
       },

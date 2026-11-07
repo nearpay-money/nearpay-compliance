@@ -60,18 +60,19 @@ nearpay-compliance/
 
 ## Configuration
 
-| Variable                  | Process     | Meaning                                                                                 |
-| ------------------------- | ----------- | --------------------------------------------------------------------------------------- |
-| `NP_DB_URL_FILE`          | all         | Database URL (app role for `api`/`worker`/ops, migrator role for `migrate`)             |
-| `NP_PII_KEK_FILE`         | api, worker | 32-byte KEK (base64 or hex) for case notes and idempotency responses at rest            |
-| `NP_JWKS_URL`             | api         | identity's JWKS (verifies service, session and ops tokens)                              |
-| `NP_NATS_URL`             | worker      | NATS JetStream                                                                          |
-| `NP_SANCTIONS_SOURCE_URL` | worker, ops | OFAC SDN advanced XML (default: the Sanctions List Service URL; `file:` for air-gapped) |
-| `NP_SANCTIONS_REFRESH`    | worker      | Daily download at 03:00 UTC and on first start (default `true`)                         |
-| `NP_SANCTIONS_TIMEOUT_MS` | worker, ops | Download timeout (default 300000; the file is ~128 MB)                                  |
-| `NP_SCREENING_VENDOR`     | all         | `none` (Stage 1: the local list is the screen)                                          |
-| `NP_KYB_VENDOR`           | all         | `manual` (Stage 1: ops decision)                                                        |
-| `NP_OPS_ACTOR`            | ops         | Default actor recorded by the ops CLI (`--actor` overrides; else `cli@<hostname>`)      |
+| Variable                                | Process          | Meaning                                                                                 |
+| --------------------------------------- | ---------------- | --------------------------------------------------------------------------------------- |
+| `NP_DB_URL_FILE`                        | all              | Database URL (app role for `api`/`worker`/ops, migrator role for `migrate`)             |
+| `NP_PII_KEK_FILE`                       | api, worker      | 32-byte KEK (base64 or hex) for case notes and idempotency responses at rest            |
+| `NP_JWKS_URL`                           | api              | identity's JWKS (verifies service, session and ops tokens)                              |
+| `NP_NATS_URL`                           | worker           | NATS JetStream                                                                          |
+| `NP_SANCTIONS_SOURCE_URL`               | worker, ops      | OFAC SDN advanced XML (default: the Sanctions List Service URL; `file:` for air-gapped) |
+| `NP_SANCTIONS_REFRESH`                  | worker           | Daily download at 03:00 UTC and on first start (default `true`)                         |
+| `NP_SANCTIONS_TIMEOUT_MS`               | worker, ops      | Download timeout (default 300000; the file is ~128 MB)                                  |
+| `NP_SCREENING_PROVIDER`                 | all              | `local` (OFAC list + blocklist behind the vendor-neutral interface; ADR-0020)           |
+| `NP_OPS_APPROVAL_TTL_SECONDS`           | api, worker, ops | Pending two-person suspension request lifetime (default 86400)                          |
+| `NP_SCREENING_VENDOR` / `NP_KYB_VENDOR` | all              | Deprecated (`none` / `manual` still accepted)                                           |
+| `NP_OPS_ACTOR`                          | ops              | Default actor recorded by the ops CLI (`--actor` overrides; else `cli@<hostname>`)      |
 
 ## Behaviour
 
@@ -94,6 +95,8 @@ docker compose exec compliance-api /nodejs/bin/node dist/ops.js kyb-decide acct_
 `kyb-show` · `kyb-decide` · `cases [--all]` · `case-investigate` · `case-close --resolution` · `case-note --note` · `blocklist-add` · `blocklist-remove` · `account-suspend` · `account-reinstate` · `geo-policy` · `geo-policy-set --countries [--regions]` · `sanctions-status` · `sanctions-refresh` · `sanctions-import <file | ->` (`-` reads stdin: `… exec -T compliance-api /nodejs/bin/node dist/ops.js sanctions-import - < SDN_ADVANCED.XML`) · `screen <type> <subject> [--chain] [--live]`. Output is JSON; errors are JSON on stderr with exit 1 (2 for usage).
 
 ## Status
+
+Stage 2 (step 2.2) implemented against `@nearpay*/spec` 0.2.0 and kit 0.2.0: self-declared KYB profile (`getKyb`, `updateKybProfile`, `submitKyb`, `getInternalKybCase`), payments' `createInternalCase`, every console route (`/ops/…`: KYB queue and decisions, cases, blocklist, screening and re-screening, merchant suspension with the two-person rule), operator actions (`evt.compliance.ops_action.recorded`), the `local` screening provider behind a provider port, and `Review.payment_intent`. Design: `nearpay-brain/lld/compliance.md` v1.6.
 
 Stage 1 (step 1.2) implemented: every Stage-1 compliance route and consumed subject of `@nearpay-internal/spec` 0.1.2, the OFAC list (SP-15), post-screening, cases and reviews, manual KYB, blocklist, geo policy, destination re-screening and the ops CLI. Compliance makes no outbound calls to other NearPay services, so it needs no peer mocks. Vendor screening and the KYB vendor (hosted flow, `POST /webhooks/kyb/{vendor}`) are Stage 2.
 

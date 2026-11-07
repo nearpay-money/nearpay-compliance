@@ -45,6 +45,8 @@ interface ExecutionObject {
   account_id: string;
   livemode: boolean;
   origin: { asset_id: string; chain: string; refund_to: string; refund_type: "origin_chain" | "intents" };
+  /** Stage 2 (`Execution.reference`): the payments object of the execution. */
+  reference?: { payment_intent?: string | null } | null;
 }
 interface AgentPaymentObject {
   id: string;
@@ -94,7 +96,7 @@ async function postScreen(
   c: Compliance,
   tx: Tx,
   s: { subjectType: "address" | "near_account"; subject: string; chain?: string; accountId: string; livemode: boolean },
-  review: { type: "execution" | "agent_payment"; id: string },
+  review: { type: "execution" | "agent_payment"; id: string; paymentIntent?: string | null },
   context: "payment" | "x402",
 ) {
   let decision: string;
@@ -123,7 +125,8 @@ async function postScreen(
   if (decision === "allow") return;
   await openCase(c, tx, {
     kind: "post_screen_hit",
-    subject: review,
+    subject: { type: review.type, id: review.id },
+    paymentIntent: review.paymentIntent ?? null,
     accountId: s.accountId,
     livemode: s.livemode,
     actor: ACTOR,
@@ -135,7 +138,8 @@ export function complianceHandlers(c: Compliance): Partial<Record<Subject, Event
   const h = (fn: (tx: Tx, e: Envelope) => Promise<void>) => inboxHandler(c.db, fn);
   return {
     "evt.identity.account.created": h(async (tx, e) => {
-      await createKybCase(tx, (e.data.object as { id: string }).id);
+      const a = e.data.object as { id: string; display_name?: string };
+      await createKybCase(tx, a.id, a.display_name);
     }),
     "evt.identity.settlement_destination.activated": h((tx, e) => monitorDestination(tx, e, true)),
     "evt.identity.settlement_destination.disabled": h((tx, e) => monitorDestination(tx, e, false)),
@@ -153,7 +157,7 @@ export function complianceHandlers(c: Compliance): Partial<Record<Subject, Event
               accountId: x.account_id,
               livemode: x.livemode,
             },
-        { type: "execution", id: x.id },
+        { type: "execution", id: x.id, paymentIntent: x.reference?.payment_intent ?? null },
         "payment",
       );
     }),
@@ -162,6 +166,7 @@ export function complianceHandlers(c: Compliance): Partial<Record<Subject, Event
       await openCase(c, tx, {
         kind: "held_execution",
         subject: { type: "execution", id: x.id },
+        paymentIntent: x.reference?.payment_intent ?? null,
         accountId: x.account_id,
         livemode: x.livemode,
         actor: ACTOR,

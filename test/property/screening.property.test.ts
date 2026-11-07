@@ -8,18 +8,19 @@ import { normalizeSubject } from "../../src/domain/screening/subject.js";
 
 const hex40 = fc.uint8Array({ minLength: 20, maxLength: 20 }).map((b) => Buffer.from(b).toString("hex"));
 const decision = fc.constantFrom("allow" as const, "block" as const, "review" as const);
+const reasonsOf = fc.subarray(["sanctions", "blocklist"]);
 const facts: fc.Arbitrary<ScreeningFacts> = fc.record({
   livemode: fc.boolean(),
   sandboxBlocked: fc.boolean(),
-  blocklisted: fc.boolean(),
-  sanctioned: fc.boolean(),
-  listLoaded: fc.boolean(),
+  provider: fc.record({
+    name: fc.constantFrom("local", "vendor"),
+    hits: reasonsOf,
+    unavailable: fc.option(fc.constantFrom("sanctions_list_unavailable", "vendor_unavailable"), { nil: null }),
+    risk: fc.option(fc.constantFrom("severe" as const, "high" as const, "medium" as const, "low" as const), {
+      nil: null,
+    }),
+  }),
   cached: fc.option(fc.record({ decision, reasons: fc.array(fc.string(), { maxLength: 2 }) }), { nil: null }),
-  vendor: fc.oneof(
-    fc.constant("none" as const),
-    fc.constant("unavailable" as const),
-    fc.record({ risk: fc.constantFrom("severe" as const, "high" as const, "medium" as const, "low" as const) }),
-  ),
   amountUsdMicros: fc.option(fc.bigInt({ min: 0n, max: 10n ** 15n }), { nil: null }),
   failClosedThresholdUsdMicros: fc.bigInt({ min: 0n, max: 10n ** 13n }),
 });
@@ -38,11 +39,12 @@ describe("screening decision properties", () => {
     );
   });
 
-  it("a live list hit always blocks, whatever the cache, vendor or amount", () => {
+  it("a live list hit always blocks, whatever the cache, provider state or amount", () => {
     fc.assert(
       fc.property(facts, fc.boolean(), (f, both) => {
-        const o = decide({ ...f, livemode: true, sanctioned: true, blocklisted: both });
-        expect(o).toMatchObject({ kind: "decided", decision: "block" });
+        const hits = both ? ["sanctions", "blocklist"] : ["sanctions"];
+        const o = decide({ ...f, livemode: true, provider: { ...f.provider, hits } });
+        expect(o).toMatchObject({ kind: "decided", decision: "block", reasons: hits });
       }),
     );
   });
@@ -50,8 +52,8 @@ describe("screening decision properties", () => {
   it("degraded screening never allows a payment at or above the fail-closed threshold", () => {
     fc.assert(
       fc.property(facts, (f) => {
-        const g = { ...f, livemode: true, blocklisted: false, sanctioned: false };
-        const degraded = !g.listLoaded || (g.cached === null && g.vendor === "unavailable");
+        const g = { ...f, livemode: true, provider: { ...f.provider, hits: [] } };
+        const degraded = g.provider.unavailable !== null;
         const o = decide(g);
         if (degraded && g.amountUsdMicros !== null && g.amountUsdMicros >= g.failClosedThresholdUsdMicros)
           expect(o).toEqual({ kind: "unavailable" });
@@ -101,8 +103,8 @@ describe("normalisation properties", () => {
   });
 });
 
-describe("KYB properties", () => {
-  it("after any command sequence the state is the last decision (or pending after a start), and only changes emit", () => {
+describe("KYB properties (manual Stage 1 path)", () => {
+  it("after any sequence of manual decisions the state is the last decision, and only changes emit", () => {
     const cmd = fc.oneof(
       fc.constant({ start: true } as const),
       fc.constantFrom<KybDecision>("approved", "rejected", "needs_info").map((d) => ({ start: false, d }) as const),
@@ -116,17 +118,13 @@ describe("KYB properties", () => {
           if (step.changed) {
             expect(step.to).not.toBe(s);
             s = step.to;
-            if (!c.start) events++;
+            events++;
           }
         }
-        const lastDecision = [...cmds].reverse().find((c) => !c.start);
-        const decisions = cmds.filter((c) => !c.start).length;
-        expect(events).toBeLessThanOrEqual(decisions);
-        if (lastDecision && !lastDecision.start) {
-          const afterLast = cmds.slice(cmds.lastIndexOf(lastDecision) + 1);
-          const restarted = lastDecision.d === "needs_info" && afterLast.some((c) => c.start);
-          expect(s).toBe(restarted ? "pending" : lastDecision.d);
-        } else expect(s).toBe(cmds.length ? "pending" : "not_started");
+        const decisions = cmds.filter((c) => !c.start);
+        expect(events).toBeLessThanOrEqual(decisions.length);
+        const last = decisions.at(-1);
+        expect(s).toBe(last && !last.start ? last.d : "not_started");
       }),
     );
   });

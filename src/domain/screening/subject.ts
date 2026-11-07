@@ -72,3 +72,26 @@ export function normalizeSubject(type: SubjectType, subject: string, chain?: str
 export function isSandboxBlocked(subject: string): boolean {
   return subject.toLowerCase().includes("sanctioned");
 }
+
+const BECH32_RE = /^(bc1|tb1|ltc1)[0-9a-z]{8,87}$/i;
+
+/**
+ * Blocklist subjects (console `addOpsBlocklistEntry`, ops CLI): with a chain, normalised exactly like a
+ * screening subject; an address without a chain is matched in every family its form fits, so it is
+ * normalised by form (EVM hex and bech32 lower-case, anything else as published). Screening matches the
+ * blocklist by normalised subject, whatever the chain.
+ */
+export function normalizeBlocklistSubject(
+  type: "address" | "near_account",
+  subject: string,
+  chain?: string,
+): { norm: string; chain: string | null } {
+  if (type === "near_account" || chain) {
+    const n = normalizeSubject(type, subject, chain);
+    return { norm: n.norm, chain: type === "near_account" ? (chain ?? null) : n.chain };
+  }
+  if (subject.length === 0 || subject.length > 256 || subject !== subject.trim() || /\s/.test(subject))
+    throw new SubjectError(`${JSON.stringify(subject)} is not an address`, "subject");
+  if (EVM_ADDRESS_RE.test(subject) || BECH32_RE.test(subject)) return { norm: subject.toLowerCase(), chain: null };
+  return { norm: subject, chain: null };
+}

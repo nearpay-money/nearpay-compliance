@@ -6,6 +6,8 @@
  * |-----------------------|-----------------|-----------------------------------------------------------------|
  * | sanctions.refresh     | daily 03:00 UTC | download + import the OFAC SDN list (failure keeps the old one) |
  * | destinations.rescreen | daily 04:00 UTC | screen active live destinations; a block disables them + case   |
+ * |                       | + console       | (`createOpsRescreen` queues it for one account or all)          |
+ * | ops_approvals.expire  | every 15 min    | pending two-person requests past their expiry → `expired`       |
  * | purge.screenings      | daily 05:00 UTC | delete screenings older than the policy retention               |
  * | kit.purge             | hourly          | published outbox, old inbox rows, expired idempotency keys       |
  */
@@ -16,6 +18,7 @@ import { blockDestination } from "../app/admin.js";
 import { type Compliance, dbNow } from "../app/context.js";
 import { refreshSanctions } from "../app/sanctions.js";
 import { screen } from "../app/screening.js";
+import { expireApprovals } from "../app/suspension.js";
 
 const HOUR = 3_600_000;
 const DAY = 24 * HOUR;
@@ -24,6 +27,7 @@ export const RECURRING: readonly RecurringJob[] = [
   { kind: "sanctions.refresh", everyMs: DAY, offsetMs: 3 * HOUR },
   { kind: "destinations.rescreen", everyMs: DAY, offsetMs: 4 * HOUR },
   { kind: "purge.screenings", everyMs: DAY, offsetMs: 5 * HOUR },
+  { kind: "ops_approvals.expire", everyMs: 15 * 60_000 },
   { kind: "kit.purge", everyMs: HOUR },
 ];
 
@@ -41,21 +45,21 @@ export interface JobOptions {
 export async function rescreenDestinations(
   c: Compliance,
   onBatch: () => Promise<void> = async () => {},
+  accountUuid: string | null = null,
 ): Promise<{ screened: number; blocked: number }> {
   let screened = 0;
   let blocked = 0;
   const started = await dbNow(c.db);
   for (;;) {
     await onBatch();
-    const batch = await c.db
+    let q = c.db
       .selectFrom("monitored_destinations")
       .selectAll()
       .where("active", "=", true)
       .where("livemode", "=", true)
-      .where((eb) => eb.or([eb("last_screened_at", "is", null), eb("last_screened_at", "<", started)]))
-      .orderBy("destination_id")
-      .limit(200)
-      .execute();
+      .where((eb) => eb.or([eb("last_screened_at", "is", null), eb("last_screened_at", "<", started)]));
+    if (accountUuid) q = q.where("account_id", "=", accountUuid);
+    const batch = await q.orderBy("destination_id").limit(200).execute();
     if (batch.length === 0) break;
     for (const d of batch) {
       const r = await screen(
@@ -105,9 +109,13 @@ export function jobHandlers(c: Compliance, o: JobOptions): Record<string, JobHan
       await ctx.extendLease(Math.ceil(o.sanctionsTimeoutMs / 1000) + 300);
       await refreshSanctions(c, o.sanctionsSourceUrl, o.sanctionsTimeoutMs, o.fetch);
     },
-    "destinations.rescreen": async (_payload, ctx: JobContext) => {
-      const r = await rescreenDestinations(c, () => ctx.extendLease(600));
-      c.log.info(r, "destinations re-screened");
+    "destinations.rescreen": async (payload, ctx: JobContext) => {
+      const account = (payload as { account_id?: string | null } | null)?.account_id ?? null;
+      const r = await rescreenDestinations(c, () => ctx.extendLease(600), account);
+      c.log.info({ ...r, account }, "destinations re-screened");
+    },
+    "ops_approvals.expire": async () => {
+      await expireApprovals(c);
     },
     "purge.screenings": async () => {
       const r = await sql`delete from screenings

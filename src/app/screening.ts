@@ -1,14 +1,19 @@
 /**
- * `POST /internal/screenings` (compliance LLD §4–§5): normalise, check the local lists, use the cache,
- * decide, persist. Every non-cached decision is stored (it is the screening record and the cache).
+ * `POST /internal/screenings` (compliance LLD §4–§5): normalise, ask the provider (vendor-neutral
+ * interface; v1 `local`), use the cache, decide, persist. Every non-cached decision is stored (it is the screening record and the cache).
  */
 import { sql } from "@nearpay-internal/db";
 import { fromUuid, toUuid, uuidv7 } from "@nearpay-internal/ids";
 import { ApiError } from "@nearpay-internal/service";
-import { cacheTtlMs, decide } from "../domain/screening/decision.js";
+import {
+  cacheTtlMs,
+  decide,
+  type ProviderResult,
+  SANDBOX_PROVIDER,
+  storedProvider,
+} from "../domain/screening/decision.js";
 import { isSandboxBlocked, normalizeSubject, SubjectError, type SubjectType } from "../domain/screening/subject.js";
 import { type Compliance, dbNow } from "./context.js";
-import { OFAC_SOURCE } from "./sanctions.js";
 
 export interface ScreenInput {
   subject_type: SubjectType;
@@ -27,6 +32,7 @@ export type ScreenResult = {
   reasons: string[];
   cached: boolean;
   post_screen_required: boolean;
+  provider: "local" | "sandbox";
 };
 
 /** Loads the policy the decision needs (one row; policies are data, FR-CMP-03). */
@@ -35,10 +41,15 @@ export async function currentPolicy(c: Compliance) {
 }
 
 /**
- * Screens a subject. `fresh` skips the cache (post-screening after settlement must see today's lists,
- * not this morning's decision).
+ * Screens a subject. `fresh` skips the cache (post-screening after settlement and console lookups
+ * must see today's lists, not this morning's decision); `uncached` also stores the result so that it
+ * is never served from the cache (console lookups, LLD §5.1).
  */
-export async function screen(c: Compliance, input: ScreenInput, o: { fresh?: boolean } = {}): Promise<ScreenResult> {
+export async function screen(
+  c: Compliance,
+  input: ScreenInput,
+  o: { fresh?: boolean; uncached?: boolean; requestedBy?: string } = {},
+): Promise<ScreenResult> {
   const started = performance.now();
   let subject: ReturnType<typeof normalizeSubject>;
   try {
@@ -50,74 +61,46 @@ export async function screen(c: Compliance, input: ScreenInput, o: { fresh?: boo
   const policy = await currentPolicy(c);
   const now = await dbNow(c.db);
 
-  let blocklisted = false;
-  let sanctioned = false;
-  let listLoaded = true;
+  // Test mode never consults the live lists (INV-8): the provider is asked only in live mode.
+  const provider: ProviderResult = input.livemode
+    ? await c.provider.check(c.db, subject)
+    : { name: SANDBOX_PROVIDER, hits: [], unavailable: null, risk: null };
   let cached: {
     id: string;
     decision: "allow" | "block" | "review";
     reasons: string[];
     risk: string | null;
     post: boolean;
+    provider: string;
   } | null = null;
-  if (input.livemode) {
-    const bl = await c.db
-      .selectFrom("blocklist")
-      .select("subject")
-      .where("subject", "in", [subject.norm, ...subject.listKeys.map((k) => k.address)])
+  if (input.livemode && !o.fresh && !o.uncached) {
+    const row = await c.db
+      .selectFrom("screenings")
+      .select(["id", "decision", "reasons", "risk", "post_screen_required", "provider"])
+      .where("subject_type", "=", subject.type)
+      .where(sql<string>`coalesce(chain, '')`, "=", subject.chain ?? "")
+      .where("subject_norm", "=", subject.norm)
+      .where("livemode", "=", true)
+      .where("expires_at", ">", now)
+      .orderBy("expires_at", "desc")
+      .limit(1)
       .executeTakeFirst();
-    blocklisted = bl !== undefined;
-    const hit = await c.db
-      .selectFrom("sanctions_entries")
-      .select("address_norm")
-      .where((eb) =>
-        eb.or(
-          subject.listKeys.map((k) =>
-            k.family === "*"
-              ? eb("address_norm", "=", k.address)
-              : eb.and([eb("chain_family", "=", k.family), eb("address_norm", "=", k.address)]),
-          ),
-        ),
-      )
-      .executeTakeFirst();
-    sanctioned = hit !== undefined;
-    listLoaded =
-      (await c.db
-        .selectFrom("sanctions_lists")
-        .select("source")
-        .where("source", "=", OFAC_SOURCE)
-        .executeTakeFirst()) !== undefined;
-    if (!o.fresh) {
-      const row = await c.db
-        .selectFrom("screenings")
-        .select(["id", "decision", "reasons", "risk", "post_screen_required"])
-        .where("subject_type", "=", subject.type)
-        .where(sql<string>`coalesce(chain, '')`, "=", subject.chain ?? "")
-        .where("subject_norm", "=", subject.norm)
-        .where("livemode", "=", true)
-        .where("expires_at", ">", now)
-        .orderBy("expires_at", "desc")
-        .limit(1)
-        .executeTakeFirst();
-      if (row)
-        cached = {
-          id: row.id,
-          decision: row.decision,
-          reasons: row.reasons,
-          risk: row.risk,
-          post: row.post_screen_required,
-        };
-    }
+    if (row)
+      cached = {
+        id: row.id,
+        decision: row.decision,
+        reasons: row.reasons,
+        risk: row.risk,
+        post: row.post_screen_required,
+        provider: row.provider,
+      };
   }
 
   const outcome = decide({
     livemode: input.livemode,
     sandboxBlocked: isSandboxBlocked(input.subject),
-    blocklisted,
-    sanctioned,
-    listLoaded,
+    provider,
     cached,
-    vendor: c.screeningVendor,
     amountUsdMicros: input.amount_usd_micros === undefined ? null : BigInt(input.amount_usd_micros),
     failClosedThresholdUsdMicros: policy.fail_closed_threshold_usd_micros,
   });
@@ -140,9 +123,11 @@ export async function screen(c: Compliance, input: ScreenInput, o: { fresh?: boo
       reasons: cached.reasons,
       cached: true,
       post_screen_required: cached.post,
+      provider: storedProvider(cached.provider),
     };
   }
   const id = uuidv7();
+  const ttl = o.uncached ? 0 : cacheTtlMs(outcome.decision, outcome.postScreenRequired);
   await c.db
     .insertInto("screenings")
     .values({
@@ -158,7 +143,9 @@ export async function screen(c: Compliance, input: ScreenInput, o: { fresh?: boo
       reasons: [...outcome.reasons],
       provider: outcome.provider,
       post_screen_required: outcome.postScreenRequired,
-      expires_at: new Date(now.getTime() + cacheTtlMs(outcome.decision, outcome.postScreenRequired)),
+      created_at: now,
+      expires_at: new Date(now.getTime() + ttl),
+      requested_by: o.requestedBy ?? null,
     })
     .execute();
   if (outcome.decision !== "allow")
@@ -168,6 +155,7 @@ export async function screen(c: Compliance, input: ScreenInput, o: { fresh?: boo
         chain: subject.chain,
         decision: outcome.decision,
         reasons: outcome.reasons,
+        provider: outcome.provider,
         lm: input.livemode,
       },
       "screening hit",
@@ -179,5 +167,6 @@ export async function screen(c: Compliance, input: ScreenInput, o: { fresh?: boo
     reasons: [...outcome.reasons],
     cached: false,
     post_screen_required: outcome.postScreenRequired,
+    provider: storedProvider(outcome.provider),
   };
 }
