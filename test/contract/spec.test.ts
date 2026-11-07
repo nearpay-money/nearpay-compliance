@@ -1,26 +1,43 @@
 /**
- * Contract (foundations §16): every Stage-1 compliance route of the spec is bound, every subject the
+ * Contract (foundations §16): every Stage 1 and Stage 2 compliance route of the spec (internal,
+ * dashboard and console) is bound, every subject the
  * catalogue routes to compliance has a handler, every subject compliance produces is emitted, and
  * responses (success and error) have the spec's shapes.
  */
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
-import { ErrorEnvelope, PUBLIC_ROUTES, startKyb } from "@nearpay/spec";
+import { ErrorEnvelope, getKyb, PUBLIC_ROUTES, startKyb } from "@nearpay/spec";
 import { unhandledSubjects } from "@nearpay-internal/bus";
+import { sql } from "@nearpay-internal/db";
 import { newId } from "@nearpay-internal/ids";
 import { unimplementedRoutes } from "@nearpay-internal/service";
 import {
+  createInternalCase,
+  createOpsSuspensionRequest,
   createScreening,
   decideKyb,
   getGeoPolicy,
+  getInternalKybCase,
+  getOpsKybCase,
+  getOpsMerchantSuspension,
   INTERNAL_ROUTES,
+  listOpsBlocklist,
+  listOpsCases,
   SUBJECTS,
   type Subject,
 } from "@nearpay-internal/spec";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { complianceRoutes } from "../../src/api/routes.js";
 import { complianceHandlers } from "../../src/consumers/handlers.js";
-import { mintServiceToken, opsToken, type Stack, sessionToken, startStack } from "../support/stack.js";
+import {
+  consoleToken,
+  mintServiceToken,
+  newOperator,
+  opsToken,
+  type Stack,
+  sessionToken,
+  startStack,
+} from "../support/stack.js";
 
 let s: Stack;
 beforeAll(async () => {
@@ -33,10 +50,13 @@ afterAll(async () => {
 const ALL_ROUTES = [...PUBLIC_ROUTES, ...INTERNAL_ROUTES];
 
 describe("routes", () => {
-  it("binds every Stage-1 compliance route, and nothing else", () => {
+  it("binds every Stage 1–2 compliance route (internal, dashboard, console), and nothing else", () => {
     const bindings = complianceRoutes({} as never);
-    expect(unimplementedRoutes("compliance", ALL_ROUTES, bindings).map((r) => r.id)).toEqual([]);
-    const ours = ALL_ROUTES.filter((r) => r.service === "compliance" && r.stage <= 1).map((r) => r.id);
+    expect(unimplementedRoutes("compliance", ALL_ROUTES, bindings, 2).map((r) => r.id)).toEqual([]);
+    const ours = [...new Set(ALL_ROUTES.filter((r) => r.service === "compliance" && r.stage <= 2).map((r) => r.id))];
+    expect(ours).toEqual(
+      expect.arrayContaining(["decideOpsKybCase", "approveOpsSuspensionRequest", "createInternalCase"]),
+    );
     expect(bindings.map((b) => b.route.id).sort()).toEqual([...ours].sort());
   });
 
@@ -56,6 +76,51 @@ describe("routes", () => {
       token: await opsToken(),
     });
     expect(decideKyb.response.safeParse(decided.body).success, JSON.stringify(decided.body)).toBe(true);
+
+    // Stage 2
+    const kyb2 = await s.call("GET", "/v1/account/kyb", { token: await sessionToken(acct) });
+    expect(getKyb.response.safeParse(kyb2.body).success, JSON.stringify(kyb2.body)).toBe(true);
+    const internal = await s.call("GET", `/internal/kyb_cases/${acct}`, { token: await mintServiceToken("identity") });
+    expect(getInternalKybCase.response.safeParse(internal.body).success, JSON.stringify(internal.body)).toBe(true);
+    const op = newOperator("ops_admin");
+    const opsKyb = await s.call("GET", `/ops/kyb_cases/${acct}`, { token: await consoleToken(op) });
+    expect(getOpsKybCase.response.safeParse(opsKyb.body).success, JSON.stringify(opsKyb.body)).toBe(true);
+    const cases = await s.call("GET", "/ops/cases", { token: await consoleToken(op) });
+    expect(listOpsCases.response.safeParse(cases.body).success, JSON.stringify(cases.body)).toBe(true);
+    const created = await s.call("POST", "/internal/cases", {
+      body: {
+        kind: "reconciliation_diff",
+        account_id: acct,
+        livemode: false,
+        subject: { type: "reconciliation_run", id: newId("rcn") },
+        note: "1 diff",
+      },
+      token: await mintServiceToken("payments"),
+    });
+    expect(createInternalCase.response.safeParse(created.body).success, JSON.stringify(created.body)).toBe(true);
+    const bl = await s.call("GET", "/ops/blocklist", { token: await consoleToken(op) });
+    expect(listOpsBlocklist.response.safeParse(bl.body).success, JSON.stringify(bl.body)).toBe(true);
+    const susp = await s.call("POST", `/ops/merchants/${acct}/suspension_requests`, {
+      body: { action: "suspend", reason: "contract" },
+      token: await consoleToken(op),
+    });
+    expect(createOpsSuspensionRequest.response.safeParse(susp.body).success, JSON.stringify(susp.body)).toBe(true);
+    const state = await s.call("GET", `/ops/merchants/${acct}/suspension`, { token: await consoleToken(op) });
+    expect(getOpsMerchantSuspension.response.safeParse(state.body).success, JSON.stringify(state.body)).toBe(true);
+  });
+
+  it("every event compliance writes matches its catalogue schema", async () => {
+    const rows = (
+      await sql<{
+        subject: Subject;
+        payload: { data: { object: unknown } };
+      }>`select subject, payload from outbox`.execute(s.admin.db)
+    ).rows;
+    expect(rows.length).toBeGreaterThan(0);
+    for (const r of rows) {
+      const parsed = SUBJECTS[r.subject].object.safeParse(r.payload.data.object);
+      expect(parsed.success, `${r.subject}: ${JSON.stringify(r.payload.data.object)}`).toBe(true);
+    }
   });
 
   it("errors use the spec error envelope", async () => {
@@ -86,7 +151,7 @@ describe("events", () => {
 
   it("emits every subject compliance produces (and only those)", () => {
     const produced = (Object.keys(SUBJECTS) as Subject[]).filter(
-      (k) => SUBJECTS[k].producer === "compliance" && SUBJECTS[k].stage <= 1,
+      (k) => SUBJECTS[k].producer === "compliance" && SUBJECTS[k].stage <= 2,
     );
     const files = (dir: string): string[] =>
       readdirSync(dir).flatMap((f) => (statSync(join(dir, f)).isDirectory() ? files(join(dir, f)) : [join(dir, f)]));

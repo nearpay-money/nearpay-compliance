@@ -4,6 +4,7 @@ import { emit, sql } from "@nearpay-internal/db";
 import type { Logger, ServiceMetrics } from "@nearpay-internal/service";
 import type { Subject } from "@nearpay-internal/spec";
 import type { DB } from "../infra/db/schema.js";
+import type { ScreeningProvider } from "./screening-provider.js";
 
 export interface ComplianceMetrics {
   screenings(labels: { context: string; decision: string; provider: string; cached: string }): void;
@@ -16,7 +17,10 @@ export interface Compliance {
   readonly cipher: EnvelopeCipher;
   readonly log: Logger;
   readonly metrics: ComplianceMetrics;
-  readonly screeningVendor: "none";
+  /** Live screening provider behind the vendor-neutral interface (v1: `local`). */
+  readonly provider: ScreeningProvider;
+  /** Lifetime of a pending two-person request (`NP_OPS_APPROVAL_TTL_SECONDS`, default 24 h). */
+  readonly opsApprovalTtlSeconds: number;
 }
 
 export type Tx = Transaction<DB>;

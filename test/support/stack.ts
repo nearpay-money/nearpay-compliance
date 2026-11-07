@@ -6,12 +6,15 @@
  */
 import { randomBytes } from "node:crypto";
 import { createReadStream } from "node:fs";
+import { OPS_SCOPES } from "@nearpay/spec";
 import { type Bus, connectBus, type Envelope, publish } from "@nearpay-internal/bus";
-import { createDb, type Database, migrate } from "@nearpay-internal/db";
+import { createDb, type Database, migrate, sql } from "@nearpay-internal/db";
+import { newId } from "@nearpay-internal/ids";
 import type { Service } from "@nearpay-internal/service";
 import {
   type EventProbe,
   eventProbe,
+  mintOpsToken,
   mintServiceToken,
   mintTestToken,
   provisionServiceDatabase,
@@ -45,7 +48,7 @@ export interface Stack {
   readonly kek: string;
   readonly appUrl: string;
   call(
-    method: "GET" | "POST",
+    method: "GET" | "POST" | "PATCH",
     url: string,
     o?: { body?: unknown; token?: string; headers?: Record<string, string> },
   ): Promise<{ status: number; body: unknown }>;
@@ -81,8 +84,8 @@ export async function startStack(o: StackOptions = {}): Promise<Stack> {
     dbUrl: appUrl,
     piiKek: kek,
     sanctionsSourceUrl: o.sanctionsSourceUrl ?? "https://ofac.example/SDN_ADVANCED.XML",
-    screeningVendor: "none" as const,
-    kybVendor: "manual" as const,
+    screeningProvider: "local" as const,
+    opsApprovalTtlSeconds: 86_400,
   };
   const apiConfig: ApiConfig = base;
   const apiDb = createDb<DB>({ url: appUrl, applicationName: "compliance-api-test" });
@@ -170,10 +173,63 @@ export async function eventually<T>(fn: () => Promise<T | null | undefined | fal
   }
 }
 
+/** Ops token for the Stage 1 manual decision route (`decideKyb`, opsRoles ops|ops_admin since spec 0.2.0). */
 export const opsToken = (scopes: string[] = ["compliance.kyb.decide"]) =>
-  mintTestToken({ sub: "usr_ops_alice", ptype: "ops", scp: scopes });
+  mintOpsToken({ sub: "usr_ops_alice", role: "ops", scopes });
 
-export const sessionToken = (acct: string, role: "owner" | "admin" | "developer" | "viewer" = "owner") =>
-  mintTestToken({ sub: "usr_owner", acct, lm: false, ptype: "session", scp: [], role });
+export interface TestOperator {
+  readonly sub: string;
+  readonly role: "ops" | "ops_admin";
+}
+
+export const newOperator = (role: "ops" | "ops_admin" = "ops"): TestOperator => ({ sub: newId("usr"), role });
+
+/**
+ * Console token of an operator (kit `mintOpsToken`: `ptype=ops`, `ops_role`, the role's scopes) with a fresh
+ * step-up unless `stepUp: false`; `role: null` mints a token without `ops_role` (must be refused).
+ */
+export const consoleToken = (op: TestOperator, o: { stepUp?: boolean; scopes?: string[]; role?: null } = {}) =>
+  o.role === null
+    ? mintTestToken({ sub: op.sub, ptype: "ops", scp: o.scopes ?? [...OPS_SCOPES] })
+    : mintOpsToken({
+        sub: op.sub,
+        role: op.role,
+        ...(o.scopes ? { scopes: o.scopes } : {}),
+        stepUp: o.stepUp !== false,
+      });
+
+export const OWNER = newId("usr");
+
+export const sessionToken = (
+  acct: string,
+  role: "owner" | "admin" | "developer" | "viewer" = "owner",
+  o: { stepUp?: boolean; sub?: string } = {},
+) =>
+  mintTestToken({
+    sub: o.sub ?? OWNER,
+    acct,
+    lm: false,
+    ptype: "session",
+    scp: [],
+    role,
+    ...(o.stepUp ? { step_up_until: Math.floor(Date.now() / 1000) + 600 } : {}),
+  });
+
+/** Outbox rows of a subject (payload = the envelope). */
+export async function outboxOf(
+  s: Stack,
+  subject: string,
+): Promise<
+  {
+    aggregate: { type: string; id: string; version: number };
+    account_id: string | null;
+    data: { object: Record<string, unknown> };
+  }[]
+> {
+  const r = await sql<{
+    payload: never;
+  }>`select payload from outbox where subject = ${subject} order by created_at, id`.execute(s.admin.db);
+  return r.rows.map((x) => x.payload);
+}
 
 export { mintServiceToken, mintTestToken };

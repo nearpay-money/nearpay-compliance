@@ -30,7 +30,7 @@ export const USAGE = `usage: ops.js <command> [arguments] [--actor <name>]
   case-note <case_…> --note <text>
   blocklist-add address|near_account <subject> [--chain <chain>] --reason <text>
   blocklist-remove address|near_account <subject> [--chain <chain>]
-  account-suspend <acct_…> --reason <text>
+  account-suspend <acct_…> --reason <text>      (local/test stacks; NP_ENV=server needs the console)
   account-reinstate <acct_…> --reason <text>
   geo-policy
   geo-policy-set --countries <CC,CC,…> [--regions <CC-RR,…>]
@@ -42,6 +42,8 @@ export const USAGE = `usage: ops.js <command> [arguments] [--actor <name>]
 export interface OpsDeps {
   /** Default actor when `--actor` is not given. */
   actor: string;
+  /** `NP_ENV`: on `server` the single-person suspension commands refuse (`two_person_required`). */
+  env?: string;
   sanctions: { source: string; timeoutMs: number; fetch?: typeof fetch };
   out?: (line: string) => void;
   err?: (line: string) => void;
@@ -66,7 +68,7 @@ const OPTIONS = {
 } as const;
 
 const KYB_DECISIONS: readonly KybDecision[] = ["approved", "rejected", "needs_info"];
-const BLOCKLIST_TYPES: readonly SubjectType[] = ["address", "near_account"];
+const BLOCKLIST_TYPES: readonly ("address" | "near_account")[] = ["address", "near_account"];
 const SCREEN_TYPES: readonly SubjectType[] = ["address", "near_account", "destination"];
 
 function need(v: string | undefined, what: string): string {
@@ -174,7 +176,14 @@ export async function runOps(argv: readonly string[], c: Compliance, deps: OpsDe
       case "account-suspend":
       case "account-reinstate": {
         const acct = need(args[0], "account id");
-        const r = await setAccountSuspended(c, acct, command === "account-suspend", need(v.reason, "--reason"), actor);
+        const r = await setAccountSuspended(
+          c,
+          acct,
+          command === "account-suspend",
+          need(v.reason, "--reason"),
+          actor,
+          deps.env ?? "local",
+        );
         print({ account_id: acct, suspended: command === "account-suspend", ...r });
         return 0;
       }

@@ -23,11 +23,16 @@ async function ops(...argv: string[]) {
 }
 
 async function opsWith(stdin: Readable | undefined, ...argv: string[]) {
+  return opsEnv(stdin, "local", ...argv);
+}
+
+async function opsEnv(stdin: Readable | undefined, env: string, ...argv: string[]) {
   const out: string[] = [];
   const err: string[] = [];
   const f = (async () => new Response(new Uint8Array(readFileSync(SAMPLE_SDN)))) as unknown as typeof fetch;
   const code = await runOps(argv, s.compliance, {
     actor: "cli@test",
+    env,
     sanctions: { source: "https://ofac.example/SDN", timeoutMs: 5_000, fetch: f },
     out: (l) => out.push(l),
     err: (l) => err.push(l),
@@ -169,6 +174,30 @@ describe("blocklist, accounts, geo policy", () => {
       account_id: acct,
       suspended: false,
       changed: true,
+    });
+  });
+
+  it("refuses single-person suspension on the server stage (two-person rule)", async () => {
+    const acct = newId("acct");
+    for (const cmd of ["account-suspend", "account-reinstate"]) {
+      const r = await opsEnv(undefined, "server", cmd, acct, "--reason", "fraud");
+      expect(r.code).toBe(1);
+      expect(JSON.parse(r.err)).toMatchObject({ error: { code: "two_person_required" } });
+    }
+    expect(
+      await s.admin.db
+        .selectFrom("account_flags")
+        .select("account_id")
+        .where("account_id", "=", toUuid(acct, "acct"))
+        .executeTakeFirst(),
+    ).toBeUndefined();
+  });
+
+  it("adds a blocklist address without a chain (matched in every family)", async () => {
+    const r = await ops("blocklist-add", "address", "0x8888888888888888888888888888888888888888", "--reason", "x");
+    expect(r.json).toMatchObject({ subject: "0x8888888888888888888888888888888888888888" });
+    expect((await ops("blocklist-remove", "address", "0x8888888888888888888888888888888888888888")).json).toEqual({
+      removed: 1,
     });
   });
 

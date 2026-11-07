@@ -1,13 +1,68 @@
 import { describe, expect, it } from "vitest";
-import { isReview, severityOf, transitionCase } from "../../src/domain/case/case.js";
+import {
+  assignCase,
+  closeCase,
+  isReview,
+  resolutionOf,
+  severityOf,
+  severityRank,
+  timelineAction,
+  transitionCase,
+} from "../../src/domain/case/case.js";
 import { normalizePolicy, PolicyError } from "../../src/domain/geo-policy/policy.js";
-import { decideKyb, KYB_STATUSES, kybSubject, startKyb } from "../../src/domain/kyb-case/kyb.js";
+import {
+  decideConsole,
+  decideKyb,
+  isEditable,
+  KYB_STATUSES,
+  kybSubject,
+  startKyb,
+  submitKyb,
+} from "../../src/domain/kyb-case/kyb.js";
 
 describe("KYB case", () => {
-  it("starting moves not_started and needs_info to pending, leaves the rest", () => {
-    expect(startKyb("not_started")).toEqual({ changed: true, to: "pending" });
-    expect(startKyb("needs_info")).toEqual({ changed: true, to: "pending" });
-    for (const s of ["pending", "approved", "rejected"] as const) expect(startKyb(s)).toEqual({ changed: false });
+  it("starting only creates/returns the case (pending means submitted since Stage 2)", () => {
+    for (const s of KYB_STATUSES) expect(startKyb(s)).toEqual({ changed: false });
+  });
+  it("the owner edits and submits only in not_started / needs_info", () => {
+    expect(KYB_STATUSES.filter(isEditable)).toEqual(["not_started", "needs_info"]);
+    expect(submitKyb("not_started", [])).toEqual({ ok: true, to: "pending" });
+    expect(submitKyb("needs_info", [])).toEqual({ ok: true, to: "pending" });
+    for (const s of ["pending", "approved", "rejected"] as const)
+      expect(submitKyb(s, [])).toEqual({ ok: false, reason: "state" });
+    expect(submitKyb("not_started", ["legal_name"])).toEqual({
+      ok: false,
+      reason: "incomplete",
+      missing: ["legal_name"],
+    });
+    // the state check comes first: a decided case is a conflict, whatever the profile
+    expect(submitKyb("approved", ["legal_name"])).toEqual({ ok: false, reason: "state" });
+  });
+  it("console decisions follow the state table", () => {
+    const ok = { requestedInfo: "add your register number", profileComplete: true };
+    expect(decideConsole("pending", "approved", ok)).toEqual({ changed: true, to: "approved" });
+    for (const s of ["not_started", "needs_info", "rejected"] as const)
+      expect(decideConsole(s, "approved", ok)).toMatchObject({ error: "state_conflict" });
+    expect(decideConsole("pending", "rejected", ok)).toEqual({ changed: true, to: "rejected" });
+    expect(decideConsole("approved", "rejected", ok)).toEqual({ changed: true, to: "rejected" });
+    for (const s of ["not_started", "needs_info"] as const)
+      expect(decideConsole(s, "rejected", ok)).toMatchObject({ error: "state_conflict" });
+    for (const s of ["pending", "approved", "rejected"] as const)
+      expect(decideConsole(s, "needs_info", ok)).toEqual({ changed: true, to: "needs_info" });
+    expect(decideConsole("not_started", "needs_info", ok)).toMatchObject({ error: "state_conflict" });
+    for (const d of ["approved", "rejected", "needs_info"] as const)
+      expect(decideConsole(d, d, { requestedInfo: undefined, profileComplete: false })).toEqual({ changed: false });
+  });
+  it("console needs_info needs requested_info; approval needs a complete declaration", () => {
+    expect(decideConsole("pending", "needs_info", { requestedInfo: undefined, profileComplete: true })).toMatchObject({
+      error: "requested_info_required",
+    });
+    expect(decideConsole("pending", "needs_info", { requestedInfo: "  ", profileComplete: true })).toMatchObject({
+      error: "requested_info_required",
+    });
+    expect(decideConsole("pending", "approved", { requestedInfo: undefined, profileComplete: false })).toMatchObject({
+      error: "profile_incomplete",
+    });
   });
   it("a decision changes any other state and is idempotent on its own state", () => {
     for (const from of KYB_STATUSES)
@@ -44,6 +99,36 @@ describe("compliance cases", () => {
     expect(severityOf("post_screen_hit", true)).toBe("high");
     expect(severityOf("screening_hit", true)).toBe("high");
     expect(severityOf("merchant_report", true)).toBe("medium");
+  });
+  it("reconciliation diffs are high in live mode and never reviews", () => {
+    expect(severityOf("reconciliation_diff", true)).toBe("high");
+    expect(severityOf("reconciliation_diff", false)).toBe("low");
+    expect(isReview("reconciliation_diff", { type: "reconciliation_run" })).toBe(false);
+    expect(isReview("screening_hit", { type: "reconciliation_run" })).toBe(false);
+  });
+  it("console assignment and closing", () => {
+    expect(assignCase("open", "usr_1")).toEqual({ ok: true, to: "investigating" });
+    expect(assignCase("investigating", "usr_1")).toEqual({ ok: true, to: "investigating" });
+    expect(assignCase("open", null)).toEqual({ ok: true, to: "open" });
+    expect(assignCase("investigating", null)).toEqual({ ok: true, to: "investigating" });
+    expect(assignCase("closed", "usr_1")).toMatchObject({ ok: false });
+    expect(assignCase("closed", null)).toMatchObject({ ok: false });
+    expect(closeCase("open")).toEqual({ ok: true, to: "closed" });
+    expect(closeCase("investigating")).toEqual({ ok: true, to: "closed" });
+    expect(closeCase("closed")).toMatchObject({ ok: false });
+  });
+  it("renders stored resolutions, timeline actions and severity ranks", () => {
+    expect(resolutionOf(null)).toBeNull();
+    expect(resolutionOf("false_positive")).toBe("false_positive");
+    expect(resolutionOf("checked the registry, fine")).toBe("other");
+    expect(timelineAction("opened")).toBe("opened");
+    expect(timelineAction("assigned")).toBe("assigned");
+    expect(timelineAction("unassigned")).toBe("unassigned");
+    expect(timelineAction("closed")).toBe("closed");
+    expect(timelineAction("investigating")).toBe("assigned");
+    expect(timelineAction("note")).toBe("commented");
+    expect(timelineAction("commented")).toBe("commented");
+    expect(["low", "medium", "high", "critical", "bogus"].map(severityRank)).toEqual([1, 2, 3, 4, 0]);
   });
   it("transitions: open → investigating → closed; closed is terminal; no self-transitions", () => {
     expect(transitionCase("open", "investigating")).toEqual({ ok: true, to: "investigating" });

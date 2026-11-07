@@ -36,9 +36,11 @@ import type { ApiConfig, WorkerConfig } from "../config.js";
 import { complianceHandlers, deadLetters } from "../consumers/handlers.js";
 import { MIGRATIONS_DIR } from "../infra/db/migrations.js";
 import type { DB } from "../infra/db/schema.js";
+import { localProvider } from "../vendors/screening/local.js";
 import { jobHandlers, RECURRING } from "../workers/jobs.js";
 import { type Compliance, complianceMetrics } from "./context.js";
 import { sanctionsAgeHours } from "./sanctions.js";
+import type { ScreeningProvider, ScreeningProviderName } from "./screening-provider.js";
 
 export interface ServiceDeps {
   keys?: KeySource;
@@ -47,14 +49,26 @@ export interface ServiceDeps {
 
 type Mutable<T> = { -readonly [K in keyof T]: T[K] };
 
+/** The screening provider behind the vendor-neutral interface (v1: `local` only). */
+export function screeningProvider(name: ScreeningProviderName): ScreeningProvider {
+  switch (name) {
+    case "local":
+      return localProvider();
+  }
+}
+
 /** The bootstrap creates the logger and metrics, so they are attached right after the service exists. */
-function context(database: Database<DB>, kek: string, vendor: "none"): Mutable<Compliance> {
+function context(
+  database: Database<DB>,
+  config: { piiKek: string; screeningProvider: ScreeningProviderName; opsApprovalTtlSeconds: number },
+): Mutable<Compliance> {
   return {
     db: database.db,
-    cipher: createEnvelopeCipher(parseKek(kek)),
+    cipher: createEnvelopeCipher(parseKek(config.piiKek)),
     log: undefined as unknown as Compliance["log"],
     metrics: undefined as unknown as Compliance["metrics"],
-    screeningVendor: vendor,
+    provider: screeningProvider(config.screeningProvider),
+    opsApprovalTtlSeconds: config.opsApprovalTtlSeconds,
   };
 }
 
@@ -100,7 +114,7 @@ function gauges(service: Service, c: Compliance) {
 
 export function createApi(config: ApiConfig, deps: ServiceDeps = {}): { service: Service; compliance: Compliance } {
   const database = deps.database ?? createDb<DB>({ url: config.dbUrl, applicationName: "compliance-api" });
-  const c = context(database, config.piiKek, config.screeningVendor);
+  const c = context(database, config);
   const service = createService({
     name: "compliance",
     config,
@@ -120,7 +134,7 @@ export async function createWorker(
 ): Promise<{ service: Service; compliance: Compliance }> {
   const database = deps.database ?? createDb<DB>({ url: config.dbUrl, applicationName: "compliance-worker" });
   const service = createService({ name: "compliance", config, readiness: readiness(database) });
-  const c = attach(context(database, config.piiKek, config.screeningVendor), service);
+  const c = attach(context(database, config), service);
   gauges(service, c);
   const bus = deps.bus ?? (await connectBus({ url: config.natsUrl, name: `compliance-worker@${hostname()}` }));
   await ensureStreams(bus, [STREAMS.compliance]);
