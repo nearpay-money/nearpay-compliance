@@ -287,10 +287,14 @@ describe("events compliance produces reach the bus (outbox relay)", () => {
       reason: "upload the registry extract",
     });
 
-    expect(await setAccountSuspended(s.compliance, a.id, true, "fraud report", "ops:test")).toEqual({ changed: true });
-    expect(await setAccountSuspended(s.compliance, a.id, true, "again", "ops:test")).toEqual({ changed: false });
+    expect(await setAccountSuspended(s.compliance, a.id, true, "fraud report", "ops:test", "test")).toEqual({
+      changed: true,
+    });
+    expect(await setAccountSuspended(s.compliance, a.id, true, "again", "ops:test", "test")).toEqual({
+      changed: false,
+    });
     await probe.next("evt.compliance.account.suspended", (e) => e.aggregate.id === a.id);
-    await setAccountSuspended(s.compliance, a.id, false, "cleared", "ops:test");
+    await setAccountSuspended(s.compliance, a.id, false, "cleared", "ops:test", "test");
     const back = await probe.next("evt.compliance.account.reinstated", (e) => e.aggregate.id === a.id);
     expect(back.aggregate.version).toBe(2);
 

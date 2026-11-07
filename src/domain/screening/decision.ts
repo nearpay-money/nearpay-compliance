@@ -6,14 +6,17 @@
  *   test mode               → magic only: `sanctioned` in the subject blocks, everything else allows
  *   provider list hit       → block (`sanctions` / `blocklist` / …), whatever the cache or amount
  *   provider unavailable    → degraded (for `local`: no sanctions list imported yet,
- *                             `sanctions_list_unavailable`): amount ≥ fail-closed threshold →
- *                             unavailable (503); else allow with post-screening required
+ *                             `sanctions_list_unavailable`): amount unknown (no
+ *                             `amount_usd_micros`: destinations, x402 payers, rails legs it could
+ *                             not price) or ≥ fail-closed threshold → unavailable (503); else allow
+ *                             with post-screening required
  *   cached decision         → returned as cached
  *   provider risk (vendor)  → severe/high block, medium review (allow + case), low allow
  *   provider clear          → allow
  *
  * A degraded allow (post-screening required) is recorded but never served from the cache, so the
- * next screen consults the recovered provider. The fail policy is the Stage 1 policy, unchanged.
+ * next screen consults the recovered provider. An unknown amount fails closed like a large one (audit
+ * finding 9, stage 2): a degraded allow needs proof that the amount is below the threshold.
  */
 
 export type Decision = "allow" | "block" | "review";
@@ -78,7 +81,7 @@ export function decide(f: ScreeningFacts): ScreeningOutcome {
   const p = f.provider;
   if (p.hits.length > 0) return decided("block", p.hits, p.name);
   if (p.unavailable !== null)
-    return f.amountUsdMicros !== null && f.amountUsdMicros >= f.failClosedThresholdUsdMicros
+    return f.amountUsdMicros === null || f.amountUsdMicros >= f.failClosedThresholdUsdMicros
       ? { kind: "unavailable" }
       : decided("allow", [p.unavailable], p.name, { postScreenRequired: true });
   if (f.cached) return decided(f.cached.decision, f.cached.reasons, p.name, { cached: true });

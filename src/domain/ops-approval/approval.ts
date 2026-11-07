@@ -37,6 +37,17 @@ export interface Approval {
 
 export const DEFAULT_TTL_SECONDS = 24 * 3600;
 
+/** The only `NP_ENV` values on which the single-person suspension commands (ops CLI) are allowed. */
+export const SINGLE_PERSON_ENVS: ReadonlySet<string> = new Set(["local", "test"]);
+
+/**
+ * Allow-list, fail closed: `server`, an unknown stage, an empty or mistyped value all require the
+ * two-person console path (audit finding 2, stage 2).
+ */
+export function singlePersonAllowed(env: string): boolean {
+  return SINGLE_PERSON_ENVS.has(env);
+}
+
 export const approvalAction = (a: SuspensionAction): ApprovalAction =>
   a === "suspend" ? "account.suspend" : "account.reinstate";
 

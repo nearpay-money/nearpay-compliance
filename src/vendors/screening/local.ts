@@ -18,6 +18,7 @@ export function localProvider(): ScreeningProvider {
         .selectFrom("blocklist")
         .select("subject")
         .where("subject", "in", [subject.norm, ...subject.listKeys.map((k) => k.address)])
+        .where("removed_at", "is", null)
         .executeTakeFirst();
       const hit = await db
         .selectFrom("sanctions_entries")

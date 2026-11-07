@@ -1,4 +1,4 @@
-/** Kysely table types (migrations/0001_compliance.sql, 0002_stage2_console.sql). */
+/** Kysely table types (migrations/0001_compliance.sql, 0002_stage2_console.sql, 0003_blocklist_soft_delete.sql). */
 import type { ColumnType, Generated, KitTables } from "@nearpay-internal/db";
 
 type Timestamp = ColumnType<Date, Date | string | undefined, Date | string>;
@@ -41,6 +41,10 @@ export interface BlocklistTable {
   created_at: Timestamp;
   id: Generated<string>;
   chain: ColumnType<string | null, string | null | undefined, string | null>;
+  /** Soft delete (0003): a removed entry stays as history and no longer screens. */
+  removed_at: ColumnType<Date | null, Date | null | undefined, Date | null>;
+  removed_by: ColumnType<string | null, string | null | undefined, string | null>;
+  removal_note: ColumnType<string | null, string | null | undefined, string | null>;
 }
 
 export interface ScreeningsTable {
@@ -117,6 +121,8 @@ export interface CaseEventsTable {
   created_at: Timestamp;
 }
 
+export type OpsActionDetails = Record<string, string | number | boolean | null>;
+
 export interface MonitoredDestinationsTable {
   destination_id: string;
   account_id: string;
@@ -171,6 +177,8 @@ export interface OpsActionsTable {
   approval_id: string | null;
   note_enc: Buffer | null;
   created_at: Timestamp;
+  /** Internal structured details (0003), never published. */
+  details: ColumnType<OpsActionDetails | null, string | null | undefined, never>;
 }
 
 export interface ComplianceTables {

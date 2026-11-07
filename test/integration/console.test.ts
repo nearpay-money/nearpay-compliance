@@ -555,6 +555,66 @@ describe("blocklist, screening and re-screening (console)", () => {
     expect((page.body.data as { id: string }[]).some((x) => x.id === id)).toBe(false);
   });
 
+  it("removal keeps the entry and names the subject in the audit trail (audit finding 10, INV-9)", async () => {
+    const subject = "0x6666666666666666666666666666666666666666";
+    const added = await req("POST", "/ops/blocklist", {
+      body: { subject_type: "address", chain: "eip155:8453", subject, reason: "phishing drainer" },
+      token: await consoleToken(alice),
+    });
+    const id = added.body.id as string;
+    const r = await req("POST", `/ops/blocklist/${id}/remove`, {
+      body: { reason: "false positive" },
+      token: await consoleToken(bob),
+    });
+    expect(r.status).toBe(204);
+    // the row survives as history: subject, chain, who removed it and why
+    const row = await s.admin.db
+      .selectFrom("blocklist")
+      .selectAll()
+      .where("id", "=", toUuid(id, "bl"))
+      .executeTakeFirstOrThrow();
+    expect(row).toMatchObject({
+      subject_type: "address",
+      subject,
+      chain: "eip155:8453",
+      reason: "phishing drainer",
+      removed_by: `ops:${bob.sub}`,
+      removal_note: "false positive",
+    });
+    expect(row.removed_at).toBeInstanceOf(Date);
+    // the operator-action rows carry the subject (internal; the published event stays ids-only)
+    const actions = await s.admin.db
+      .selectFrom("ops_actions")
+      .select(["action", "details"])
+      .where("target_id", "=", id)
+      .orderBy("created_at")
+      .execute();
+    expect(actions).toEqual([
+      { action: "blocklist_entry.added", details: { subject_type: "address", subject, chain: "eip155:8453" } },
+      { action: "blocklist_entry.removed", details: { subject_type: "address", subject, chain: "eip155:8453" } },
+    ]);
+    // a removed entry no longer screens, is not listed, and the subject can be listed again (new id)
+    const svc = await mintServiceToken("rails");
+    const after = await req("POST", "/internal/screenings", {
+      body: { subject_type: "address", chain: "eip155:8453", subject, context: "payment", livemode: true },
+      token: svc,
+    });
+    expect(after.body).toMatchObject({ decision: "allow" });
+    const again = await req("POST", "/ops/blocklist", {
+      body: { subject_type: "address", chain: "eip155:8453", subject, reason: "drainer is back" },
+      token: await consoleToken(alice),
+    });
+    expect(again.status).toBe(201);
+    expect(again.body.id).not.toBe(id);
+    const list = await req("GET", `/ops/blocklist?subject=${subject}`, { token: await consoleToken(alice) });
+    expect((list.body.data as { id: string }[]).map((x) => x.id)).toEqual([again.body.id]);
+    // history cannot be erased or rewritten
+    await expect(s.admin.db.deleteFrom("blocklist").where("id", "=", toUuid(id, "bl")).execute()).rejects.toThrow();
+    await expect(
+      s.admin.db.updateTable("blocklist").set({ removed_at: null }).where("id", "=", toUuid(id, "bl")).execute(),
+    ).rejects.toThrow();
+  });
+
   it("an ops screening is a fresh lookup that never feeds the cache", async () => {
     const token = await consoleToken(alice);
     const hit = await req("POST", "/ops/screenings", {

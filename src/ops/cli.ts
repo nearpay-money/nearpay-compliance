@@ -29,8 +29,8 @@ export const USAGE = `usage: ops.js <command> [arguments] [--actor <name>]
   case-close <case_…> --resolution <text>
   case-note <case_…> --note <text>
   blocklist-add address|near_account <subject> [--chain <chain>] --reason <text>
-  blocklist-remove address|near_account <subject> [--chain <chain>]
-  account-suspend <acct_…> --reason <text>      (local/test stacks; NP_ENV=server needs the console)
+  blocklist-remove address|near_account <subject> [--chain <chain>] [--reason <text>]
+  account-suspend <acct_…> --reason <text>      (NP_ENV local/test only; elsewhere the console)
   account-reinstate <acct_…> --reason <text>
   geo-policy
   geo-policy-set --countries <CC,CC,…> [--regions <CC-RR,…>]
@@ -42,8 +42,8 @@ export const USAGE = `usage: ops.js <command> [arguments] [--actor <name>]
 export interface OpsDeps {
   /** Default actor when `--actor` is not given. */
   actor: string;
-  /** `NP_ENV`: on `server` the single-person suspension commands refuse (`two_person_required`). */
-  env?: string;
+  /** `NP_ENV`: anywhere but `local`/`test` the single-person suspension commands refuse (`two_person_required`). */
+  env: string;
   sanctions: { source: string; timeoutMs: number; fetch?: typeof fetch };
   out?: (line: string) => void;
   err?: (line: string) => void;
@@ -168,7 +168,13 @@ export async function runOps(argv: readonly string[], c: Compliance, deps: OpsDe
       }
       case "blocklist-remove": {
         const subjectType = oneOf(args[0], BLOCKLIST_TYPES, "subject type");
-        const r = await removeFromBlocklist(c, subjectType, need(args[1], "subject"), v.chain);
+        const r = await removeFromBlocklist(c, {
+          subjectType,
+          subject: need(args[1], "subject"),
+          ...(v.chain ? { chain: v.chain } : {}),
+          actor,
+          ...(v.reason ? { note: v.reason } : {}),
+        });
         c.log.warn({ subject_type: subjectType, actor, removed: r.removed }, "blocklist entry removed");
         print(r);
         return 0;
@@ -182,7 +188,7 @@ export async function runOps(argv: readonly string[], c: Compliance, deps: OpsDe
           command === "account-suspend",
           need(v.reason, "--reason"),
           actor,
-          deps.env ?? "local",
+          deps.env,
         );
         print({ account_id: acct, suspended: command === "account-suspend", ...r });
         return 0;

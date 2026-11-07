@@ -92,7 +92,7 @@ There is no network path to these actions in Stage 1 (Stage 2 moves them to the 
 docker compose exec compliance-api /nodejs/bin/node dist/ops.js kyb-decide acct_… approved --reason "registry extract checked" --actor alice
 ```
 
-`kyb-show` · `kyb-decide` · `cases [--all]` · `case-investigate` · `case-close --resolution` · `case-note --note` · `blocklist-add` · `blocklist-remove` · `account-suspend` · `account-reinstate` · `geo-policy` · `geo-policy-set --countries [--regions]` · `sanctions-status` · `sanctions-refresh` · `sanctions-import <file | ->` (`-` reads stdin: `… exec -T compliance-api /nodejs/bin/node dist/ops.js sanctions-import - < SDN_ADVANCED.XML`) · `screen <type> <subject> [--chain] [--live]`. Output is JSON; errors are JSON on stderr with exit 1 (2 for usage).
+`kyb-show` · `kyb-decide` · `cases [--all]` · `case-investigate` · `case-close --resolution` · `case-note --note` · `blocklist-add` · `blocklist-remove [--reason]` (soft delete: the entry stays as history) · `account-suspend` (only when `NP_ENV` is `local`/`test`) · `account-reinstate` · `geo-policy` · `geo-policy-set --countries [--regions]` · `sanctions-status` · `sanctions-refresh` · `sanctions-import <file | ->` (`-` reads stdin: `… exec -T compliance-api /nodejs/bin/node dist/ops.js sanctions-import - < SDN_ADVANCED.XML`) · `screen <type> <subject> [--chain] [--live]`. Output is JSON; errors are JSON on stderr with exit 1 (2 for usage).
 
 ## Status
 

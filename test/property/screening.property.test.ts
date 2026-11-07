@@ -55,9 +55,9 @@ describe("screening decision properties", () => {
         const g = { ...f, livemode: true, provider: { ...f.provider, hits: [] } };
         const degraded = g.provider.unavailable !== null;
         const o = decide(g);
-        if (degraded && g.amountUsdMicros !== null && g.amountUsdMicros >= g.failClosedThresholdUsdMicros)
+        if (degraded && (g.amountUsdMicros === null || g.amountUsdMicros >= g.failClosedThresholdUsdMicros))
           expect(o).toEqual({ kind: "unavailable" });
-        if (o.kind === "unavailable") expect(degraded && g.amountUsdMicros !== null).toBe(true);
+        if (o.kind === "unavailable") expect(degraded).toBe(true);
         if (o.kind === "decided" && o.postScreenRequired)
           expect(o.decision === "allow" && o.reasons.length === 1).toBe(true);
       }),

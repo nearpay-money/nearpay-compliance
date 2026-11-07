@@ -157,8 +157,22 @@ describe("blocklist, accounts, geo policy", () => {
       decision: "block",
       reasons: ["blocklist"],
     });
-    expect((await ops("blocklist-remove", "address", upper, "--chain", "eip155:1")).json).toEqual({ removed: 1 });
+    expect(
+      (await ops("blocklist-remove", "address", upper, "--chain", "eip155:1", "--reason", "request withdrawn")).json,
+    ).toEqual({ removed: 1 });
     expect((await ops("blocklist-remove", "address", upper, "--chain", "eip155:1")).json).toEqual({ removed: 0 });
+    // soft delete (audit finding 10): the removed entry stays as history with who and why
+    const kept = await s.admin.db
+      .selectFrom("blocklist")
+      .selectAll()
+      .where("subject", "=", "0x7777777777777777777777777777777777777777")
+      .execute();
+    expect(kept).toHaveLength(1);
+    expect(kept[0]).toMatchObject({ removed_by: "ops:cli@test", removal_note: "request withdrawn", chain: "eip155:1" });
+    // no sanctions list in this suite: a small known amount gets the degraded allow (an unknown one fails closed)
+    expect(
+      (await ops("screen", "address", upper, "--chain", "eip155:8453", "--live", "--amount-usd-micros", "1")).json,
+    ).toMatchObject({ decision: "allow" });
     expect((await ops("blocklist-add", "address", "0x12", "--chain", "eip155:1", "--reason", "x")).code).toBe(1);
   });
 
@@ -177,12 +191,14 @@ describe("blocklist, accounts, geo policy", () => {
     });
   });
 
-  it("refuses single-person suspension on the server stage (two-person rule)", async () => {
+  it("refuses single-person suspension outside local/test: server, unknown stages, empty (two-person rule)", async () => {
     const acct = newId("acct");
-    for (const cmd of ["account-suspend", "account-reinstate"]) {
-      const r = await opsEnv(undefined, "server", cmd, acct, "--reason", "fraud");
-      expect(r.code).toBe(1);
-      expect(JSON.parse(r.err)).toMatchObject({ error: { code: "two_person_required" } });
+    for (const env of ["server", "staging", ""]) {
+      for (const cmd of ["account-suspend", "account-reinstate"]) {
+        const r = await opsEnv(undefined, env, cmd, acct, "--reason", "fraud");
+        expect(r.code, `${env} ${cmd}`).toBe(1);
+        expect(JSON.parse(r.err)).toMatchObject({ error: { code: "two_person_required" } });
+      }
     }
     expect(
       await s.admin.db
