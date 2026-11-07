@@ -373,6 +373,16 @@ describe("screening fail-closed policy", () => {
     );
   });
 
+  it("a degraded screen with an unknown amount fails closed (audit finding 9)", () => {
+    fc.assert(
+      fc.property(facts, (f) => {
+        const o = decide({ ...f, amountUsdMicros: null, provider: { ...f.provider, hits: [] } });
+        if (f.provider.unavailable !== null) expect(o).toEqual({ kind: "unavailable" });
+        else expect(o.kind).toBe("decided");
+      }),
+    );
+  });
+
   it("an unavailable provider is never hidden by the cache, and never yields a cacheable allow", () => {
     fc.assert(
       fc.property(facts, (f) => {

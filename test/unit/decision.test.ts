@@ -85,8 +85,14 @@ describe("decide — live mode, local provider", () => {
       expect(decide(live({ provider: down, amountUsdMicros: THRESHOLD }))).toEqual({ kind: "unavailable" });
       expect(decide(live({ provider: down, amountUsdMicros: THRESHOLD + 1n }))).toEqual({ kind: "unavailable" });
     });
-    it("allows below the threshold (or without an amount) with post-screening required", () => {
-      for (const amount of [THRESHOLD - 1n, 0n, null])
+    it("refuses without an amount: an unknown amount cannot be shown to be below the threshold (audit finding 9)", () => {
+      expect(decide(live({ provider: down, amountUsdMicros: null }))).toEqual({ kind: "unavailable" });
+      expect(
+        decide(live({ provider: down, amountUsdMicros: null, cached: { decision: "allow", reasons: [] } })),
+      ).toEqual({ kind: "unavailable" });
+    });
+    it("allows below the threshold with post-screening required", () => {
+      for (const amount of [THRESHOLD - 1n, 0n])
         expect(decide(live({ provider: down, amountUsdMicros: amount }))).toMatchObject({
           decision: "allow",
           reasons: [reason],
@@ -99,7 +105,9 @@ describe("decide — live mode, local provider", () => {
       });
     });
     it("wins over the cache (a cached allow predates the outage)", () => {
-      expect(decide(live({ provider: down, cached: { decision: "allow", reasons: [] } }))).toMatchObject({
+      expect(
+        decide(live({ provider: down, amountUsdMicros: THRESHOLD - 1n, cached: { decision: "allow", reasons: [] } })),
+      ).toMatchObject({
         reasons: [reason],
         cached: false,
       });

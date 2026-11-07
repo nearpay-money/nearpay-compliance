@@ -56,6 +56,12 @@ describe("POST /internal/screenings", () => {
       expect(r.body).toMatchObject({ error: { code: "screening_unavailable" } });
     });
 
+    it("refuses a live screen without an amount with 503 screening_unavailable (destinations, x402 payers)", async () => {
+      const r = await screen({});
+      expect(r.status).toBe(503);
+      expect(r.body).toMatchObject({ error: { code: "screening_unavailable" } });
+    });
+
     it("allows a smaller one with post-screening required, and does not cache it", async () => {
       const r = await screen({ amount_usd_micros: 999_999_999 });
       expect(r.status).toBe(200);
