@@ -177,12 +177,14 @@ describe("blocklist, accounts, geo policy", () => {
     });
   });
 
-  it("refuses single-person suspension on the server stage (two-person rule)", async () => {
+  it("refuses single-person suspension outside local/test: server, unknown stages, empty (two-person rule)", async () => {
     const acct = newId("acct");
-    for (const cmd of ["account-suspend", "account-reinstate"]) {
-      const r = await opsEnv(undefined, "server", cmd, acct, "--reason", "fraud");
-      expect(r.code).toBe(1);
-      expect(JSON.parse(r.err)).toMatchObject({ error: { code: "two_person_required" } });
+    for (const env of ["server", "staging", ""]) {
+      for (const cmd of ["account-suspend", "account-reinstate"]) {
+        const r = await opsEnv(undefined, env, cmd, acct, "--reason", "fraud");
+        expect(r.code, `${env} ${cmd}`).toBe(1);
+        expect(JSON.parse(r.err)).toMatchObject({ error: { code: "two_person_required" } });
+      }
     }
     expect(
       await s.admin.db

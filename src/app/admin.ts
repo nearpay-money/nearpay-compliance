@@ -8,7 +8,7 @@ import { enqueueJob, sql, withTx } from "@nearpay-internal/db";
 import { fromUuid, isId, toUuid, uuidv7 } from "@nearpay-internal/ids";
 import { ApiError } from "@nearpay-internal/service";
 import { normalizePolicy, PolicyError } from "../domain/geo-policy/policy.js";
-import type { Operator } from "../domain/ops-approval/approval.js";
+import { type Operator, singlePersonAllowed } from "../domain/ops-approval/approval.js";
 import { normalizeBlocklistSubject, SubjectError } from "../domain/screening/subject.js";
 import { apiActor, openCase } from "./cases.js";
 import { type Compliance, dbNow, emitEvent, type Tx } from "./context.js";
@@ -58,8 +58,9 @@ export async function applySuspension(
 }
 
 /**
- * Ops CLI `account-suspend` / `account-reinstate`: single-person, for local and test stacks only. On
- * the server (`NP_ENV=server`) the two-person rule applies and the console is the only path.
+ * Ops CLI `account-suspend` / `account-reinstate`: single-person, only when `NP_ENV` is `local` or
+ * `test`. On any other value (`server`, an unknown stage, a mistyped one) the two-person rule applies and
+ * the console is the only path. `env` has no default: a caller must say where it runs.
  */
 export async function setAccountSuspended(
   c: Compliance,
@@ -67,9 +68,9 @@ export async function setAccountSuspended(
   suspended: boolean,
   reason: string,
   actor: string,
-  env: string = "local",
+  env: string,
 ): Promise<{ changed: boolean }> {
-  if (env === "server") throw new ApiError("two_person_required");
+  if (!singlePersonAllowed(env)) throw new ApiError("two_person_required");
   return withTx(c.db, (tx) => applySuspension(c, tx, toUuid(accountId, "acct"), suspended, reason, actor));
 }
 
