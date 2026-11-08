@@ -97,7 +97,11 @@ export function complianceRoutes(c: Compliance): RouteBinding[] {
 
   return [
     // ---- internal (services) ------------------------------------------------------------------
-    implement(createScreening, async (ctx) => screen(c, ctx.body)),
+    implement(createScreening, async (ctx) => {
+      // spec 0.2.1 `fresh`: bypass the cache (rails re-screens a refund recipient on today's lists)
+      const { fresh, ...input } = ctx.body;
+      return screen(c, input, { fresh: fresh === true });
+    }),
     implement(getGeoPolicyRoute, async () => getGeoPolicy(c)),
     implement(getInternalKybCaseRoute, async (ctx) => getInternalKybCase(c, ctx.params.id)),
     implement(createInternalCaseRoute, async (ctx) => {

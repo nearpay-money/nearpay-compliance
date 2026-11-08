@@ -57,6 +57,42 @@ describe("evt.identity.account.created", () => {
   });
 });
 
+describe("evt.identity.account.updated (spec 0.2.1)", () => {
+  it("refreshes the display name for cases and the KYB queue; older versions change nothing", async () => {
+    const a = account({ display_name: "Old Name" });
+    const acct = toUuid(a.id, "acct");
+    await s.publishEvent(domainEvent("evt.identity.account.created", a, { accountUuid: acct, version: 1 }));
+    await s.publishEvent(
+      domainEvent(
+        "evt.identity.account.updated",
+        { ...a, display_name: "New Name" },
+        { accountUuid: acct, version: 3 },
+      ),
+    );
+    const name = () =>
+      s.admin.db.selectFrom("account_names").selectAll().where("account_id", "=", acct).executeTakeFirst();
+    await eventually(async () => (await name())?.display_name === "New Name");
+    // a stale (version 2) update arriving late is ignored
+    const stale = domainEvent(
+      "evt.identity.account.updated",
+      { ...a, display_name: "Stale Name" },
+      { accountUuid: acct, version: 2 },
+    );
+    await s.publishEvent(stale);
+    await eventually(async () => {
+      const n = await s.admin.db.selectFrom("inbox").select("event_id").where("event_id", "=", stale.id).execute();
+      return n.length === 1;
+    });
+    expect(await name()).toMatchObject({ display_name: "New Name", version: 3 });
+    const kyb = await s.admin.db
+      .selectFrom("kyb_cases")
+      .select("account_display_name")
+      .where("account_id", "=", acct)
+      .executeTakeFirstOrThrow();
+    expect(kyb.account_display_name).toBe("New Name");
+  });
+});
+
 describe("settlement destinations", () => {
   it("monitors activated destinations and ignores stale versions", async () => {
     const d = internalSettlementDestination({

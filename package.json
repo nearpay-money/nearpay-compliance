@@ -28,8 +28,8 @@
     "@nearpay-internal/http": "0.2.0",
     "@nearpay-internal/ids": "0.2.0",
     "@nearpay-internal/service": "0.2.0",
-    "@nearpay-internal/spec": "0.2.0",
-    "@nearpay/spec": "0.2.0",
+    "@nearpay-internal/spec": "0.2.1",
+    "@nearpay/spec": "0.2.1",
     "sax": "1.6.1",
     "zod": "4.6.7"
   },
@@ -45,8 +45,8 @@
   },
   "pnpm": {
     "overrides": {
-      "@nearpay/spec": "0.2.0",
-      "@nearpay-internal/spec": "0.2.0"
+      "@nearpay/spec": "0.2.1",
+      "@nearpay-internal/spec": "0.2.1"
     },
     "onlyBuiltDependencies": [
       "esbuild",
