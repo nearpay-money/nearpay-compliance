@@ -3,6 +3,7 @@ import type { EnvelopeCipher, Kysely, Transaction } from "@nearpay-internal/db";
 import { emit, sql } from "@nearpay-internal/db";
 import type { Logger, ServiceMetrics } from "@nearpay-internal/service";
 import type { Subject } from "@nearpay-internal/spec";
+import type { OperatorDirectory } from "../infra/clients/identity.js";
 import type { DB } from "../infra/db/schema.js";
 import type { ScreeningProvider } from "./screening-provider.js";
 
@@ -21,6 +22,8 @@ export interface Compliance {
   readonly provider: ScreeningProvider;
   /** Lifetime of a pending two-person request (`NP_OPS_APPROVAL_TTL_SECONDS`, default 24 h). */
   readonly opsApprovalTtlSeconds: number;
+  /** Identity's operator read (api only; spec 0.2.1 `assignOpsCase` check). Absent → assignment fails closed. */
+  readonly operators?: OperatorDirectory;
 }
 
 export type Tx = Transaction<DB>;

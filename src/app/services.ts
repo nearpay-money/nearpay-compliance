@@ -34,6 +34,7 @@ import { STREAMS, type Subject } from "@nearpay-internal/spec";
 import { complianceRoutes } from "../api/routes.js";
 import type { ApiConfig, WorkerConfig } from "../config.js";
 import { complianceHandlers, deadLetters } from "../consumers/handlers.js";
+import { complianceServiceToken, httpOperatorDirectory, type OperatorDirectory } from "../infra/clients/identity.js";
 import { MIGRATIONS_DIR } from "../infra/db/migrations.js";
 import type { DB } from "../infra/db/schema.js";
 import { localProvider } from "../vendors/screening/local.js";
@@ -45,6 +46,8 @@ import type { ScreeningProvider, ScreeningProviderName } from "./screening-provi
 export interface ServiceDeps {
   keys?: KeySource;
   database?: Database<DB>;
+  /** Identity's operator read (tests inject a client of a spec mock). */
+  operators?: OperatorDirectory;
 }
 
 type Mutable<T> = { -readonly [K in keyof T]: T[K] };
@@ -115,6 +118,12 @@ function gauges(service: Service, c: Compliance) {
 export function createApi(config: ApiConfig, deps: ServiceDeps = {}): { service: Service; compliance: Compliance } {
   const database = deps.database ?? createDb<DB>({ url: config.dbUrl, applicationName: "compliance-api" });
   const c = context(database, config);
+  c.operators =
+    deps.operators ??
+    httpOperatorDirectory({
+      identityUrl: config.identityUrl,
+      serviceToken: complianceServiceToken(config.identityUrl, config.serviceClientSecret),
+    });
   const service = createService({
     name: "compliance",
     config,

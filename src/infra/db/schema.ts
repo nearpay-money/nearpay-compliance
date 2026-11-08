@@ -112,6 +112,14 @@ export interface CasesTable {
   payment_intent: ColumnType<string | null, string | null | undefined, string | null>;
 }
 
+/** Migration 0004 (spec 0.2.1): display names from identity's account events. */
+export interface AccountNamesTable {
+  account_id: string;
+  display_name: string;
+  version: number;
+  updated_at: Generated<Date>;
+}
+
 export interface CaseEventsTable {
   id: string;
   case_id: string;
@@ -190,6 +198,7 @@ export interface ComplianceTables {
   kyb_cases: KybCasesTable;
   kyb_case_transitions: KybCaseTransitionsTable;
   cases: CasesTable;
+  account_names: AccountNamesTable;
   case_events: CaseEventsTable;
   monitored_destinations: MonitoredDestinationsTable;
   account_flags: AccountFlagsTable;

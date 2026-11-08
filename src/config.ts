@@ -25,6 +25,9 @@ const shared = {
 
 export const apiShape = {
   ...shared,
+  /** Identity's internal API (`getInternalOpsOperator`, spec 0.2.1) and compliance's client secret for it. */
+  identityUrl: url(["http:", "https:"]),
+  serviceClientSecret: secret(),
   /** Lifetime of a pending two-person suspension request (LLD §8; default 24 h). */
   opsApprovalTtlSeconds: z.coerce
     .number()

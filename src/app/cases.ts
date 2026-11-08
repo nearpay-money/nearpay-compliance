@@ -25,6 +25,7 @@ import {
 } from "../domain/case/case.js";
 import type { Operator } from "../domain/ops-approval/approval.js";
 import type { CasesTable } from "../infra/db/schema.js";
+import { accountNames } from "./account-names.js";
 import { type Compliance, dbNow, emitEvent, type Tx } from "./context.js";
 import { operatorActor, recordOpsAction } from "./ops-actions.js";
 import { type Page, pageOf } from "./paging.js";
@@ -226,11 +227,17 @@ async function timeline(c: Compliance, db: Compliance["db"] | Tx, caseUuidValue:
   }));
 }
 
-export function renderCase(row: CaseRow, events?: Awaited<ReturnType<typeof timeline>>) {
+export function renderCase(
+  row: CaseRow,
+  events?: Awaited<ReturnType<typeof timeline>>,
+  accountDisplayName: string | null = null,
+) {
   return {
     id: fromUuid("case", row.id),
     object: "compliance_case" as const,
     account_id: row.account_id ? fromUuid("acct", row.account_id) : null,
+    // spec 0.2.1: from identity's account events; null for platform cases and unknown accounts
+    account_display_name: row.account_id ? accountDisplayName : null,
     livemode: row.livemode,
     kind: row.kind as CaseKind,
     subject: row.subject,
@@ -261,6 +268,8 @@ export interface CaseFilters {
   account?: string | undefined;
   assignee?: string | undefined;
   livemode?: "true" | "false" | undefined;
+  /** Spec 0.2.1: exact `subject.id` (index `cases_subject_id`). */
+  subject?: string | undefined;
   "created[gte]"?: number | undefined;
   "created[lte]"?: number | undefined;
 }
@@ -279,6 +288,7 @@ export async function listOpsCases(c: Compliance, f: CaseFilters, url: string): 
   if (f.account) q = q.where("account_id", "=", toUuid(f.account, "acct"));
   if (f.assignee) q = q.where("assignee", "=", toUuid(f.assignee, "usr"));
   if (f.livemode) q = q.where("livemode", "=", f.livemode === "true");
+  if (f.subject) q = q.where(sql<string>`subject->>'id'`, "=", f.subject);
   if (f["created[gte]"] !== undefined) q = q.where("created_at", ">=", new Date(f["created[gte]"] * 1000));
   if (f["created[lte]"] !== undefined) q = q.where("created_at", "<", new Date((f["created[lte]"] + 1) * 1000));
   const cursorId = f.starting_after ?? f.ending_before;
@@ -303,17 +313,49 @@ export async function listOpsCases(c: Compliance, f: CaseFilters, url: string): 
     ? q.orderBy(RANK, "asc").orderBy("created_at", "desc").orderBy("id", "desc")
     : q.orderBy(RANK, "desc").orderBy("created_at", "asc").orderBy("id", "asc");
   const rows = (await ordered.limit(f.limit + 1).execute()) as CaseRow[];
-  return pageOf(rows, f.limit, backwards, url, (r) => renderCase(r));
+  const names = await accountNames(
+    c.db,
+    rows.flatMap((r) => (r.account_id ? [r.account_id] : [])),
+  );
+  return pageOf(rows, f.limit, backwards, url, (r) =>
+    renderCase(r, undefined, r.account_id ? (names.get(r.account_id) ?? null) : null),
+  );
+}
+
+async function nameOf(db: Compliance["db"] | Tx, row: CaseRow): Promise<string | null> {
+  if (!row.account_id) return null;
+  return (await accountNames(db, [row.account_id])).get(row.account_id) ?? null;
 }
 
 export async function getOpsCase(c: Compliance, caseId: string): Promise<RenderedCase> {
   const row = await c.db.selectFrom("cases").selectAll().where("id", "=", caseUuid(caseId)).executeTakeFirst();
   if (!row) throw ApiError.missing("case", caseId);
-  return renderCase(row as CaseRow, await timeline(c, c.db, row.id));
+  return renderCase(row as CaseRow, await timeline(c, c.db, row.id), await nameOf(c.db, row as CaseRow));
 }
 
 async function rendered(c: Compliance, tx: Tx, row: CaseRow) {
-  return renderCase(row, await timeline(c, tx, row.id));
+  return renderCase(row, await timeline(c, tx, row.id), await nameOf(tx, row));
+}
+
+/**
+ * Spec 0.2.1: the assignee must be an active console operator (identity `getInternalOpsOperator`).
+ * Unknown or revoked → `400 invalid_request` (`assignee`); identity unavailable → fail closed (no
+ * assignment): `api_error` (retryable, `Retry-After`) — the catalogue has no generic 503 code (CR).
+ */
+async function assertActiveOperator(c: Compliance, assignee: string): Promise<void> {
+  let o: Awaited<ReturnType<NonNullable<Compliance["operators"]>["operator"]>>;
+  try {
+    if (!c.operators) throw new Error("no identity client in this process");
+    o = await c.operators.operator(assignee);
+  } catch (e) {
+    c.log.error({ err: e }, "identity operator check failed; case not assigned");
+    throw new ApiError("api_error", {
+      message: "The assignee could not be checked right now; retry with the same Idempotency-Key.",
+      headers: { "Retry-After": "5" },
+      cause: e,
+    });
+  }
+  if (!o?.active) throw ApiError.invalid(`${assignee} is not an active console operator`, "assignee");
 }
 
 /** `assignOpsCase`: assign (open → investigating) or unassign. */
@@ -324,6 +366,7 @@ export async function assignOpsCase(c: Compliance, op: Operator, caseId: string,
     if (!step.ok) throw new ApiError("state_conflict", { params: { object: "case", state: row.status } });
     const assigneeUuid = assignee ? toUuid(assignee, "usr") : null;
     if (assigneeUuid === row.assignee && step.to === row.status) return rendered(c, tx, row);
+    if (assignee) await assertActiveOperator(c, assignee);
     const updated = (await tx
       .updateTable("cases")
       .set({ assignee: assigneeUuid, status: step.to, version: row.version + 1 })

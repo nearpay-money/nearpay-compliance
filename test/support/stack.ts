@@ -11,22 +11,27 @@ import { type Bus, connectBus, type Envelope, publish } from "@nearpay-internal/
 import { createDb, type Database, migrate, sql } from "@nearpay-internal/db";
 import { newId } from "@nearpay-internal/ids";
 import type { Service } from "@nearpay-internal/service";
+import { getInternalOpsOperator, INTERNAL_ROUTES } from "@nearpay-internal/spec";
 import {
   type EventProbe,
   eventProbe,
+  type MockPeer,
   mintOpsToken,
   mintServiceToken,
   mintTestToken,
+  mockPeer,
   provisionServiceDatabase,
   type Started,
   startNats,
   startPostgres,
   testKeySource,
+  testServiceToken,
 } from "@nearpay-internal/testing";
 import type { Compliance } from "../../src/app/context.js";
 import { importSanctions } from "../../src/app/sanctions.js";
 import { createApi, createWorker } from "../../src/app/services.js";
 import type { ApiConfig, WorkerConfig } from "../../src/config.js";
+import { httpOperatorDirectory } from "../../src/infra/clients/identity.js";
 import { MIGRATIONS_DIR } from "../../src/infra/db/migrations.js";
 import type { DB } from "../../src/infra/db/schema.js";
 
@@ -47,6 +52,8 @@ export interface Stack {
   readonly bus: Bus | null;
   readonly kek: string;
   readonly appUrl: string;
+  /** Spec mock of identity (`getInternalOpsOperator`; default: every user is an active operator). */
+  readonly identity: MockPeer;
   call(
     method: "GET" | "POST" | "PATCH",
     url: string,
@@ -87,9 +94,21 @@ export async function startStack(o: StackOptions = {}): Promise<Stack> {
     screeningProvider: "local" as const,
     opsApprovalTtlSeconds: 86_400,
   };
-  const apiConfig: ApiConfig = base;
+  const identity = await mockPeer({ service: "identity", routes: INTERNAL_ROUTES });
+  identity.on(getInternalOpsOperator, async (ctx) => ({
+    user_id: ctx.params.id,
+    role: "ops" as const,
+    active: true,
+    created_at: new Date().toISOString(),
+    revoked_at: null,
+  }));
+  const apiConfig: ApiConfig = { ...base, identityUrl: identity.url, serviceClientSecret: "unused-in-tests" };
   const apiDb = createDb<DB>({ url: appUrl, applicationName: "compliance-api-test" });
-  const { service: api, compliance } = createApi(apiConfig, { keys: testKeySource(), database: apiDb });
+  const { service: api, compliance } = createApi(apiConfig, {
+    keys: testKeySource(),
+    database: apiDb,
+    operators: httpOperatorDirectory({ identityUrl: identity.url, serviceToken: testServiceToken("compliance") }),
+  });
   await api.start();
 
   let worker: Stack["worker"] = null;
@@ -123,6 +142,7 @@ export async function startStack(o: StackOptions = {}): Promise<Stack> {
     bus,
     kek,
     appUrl,
+    identity,
     async call(method, url, opts = {}) {
       const token = opts.token ?? (await mintServiceToken("rails"));
       const r = await api.app.inject({
@@ -147,6 +167,7 @@ export async function startStack(o: StackOptions = {}): Promise<Stack> {
     async stop() {
       await worker?.service.stop();
       await api.stop();
+      await identity.stop();
       await bus?.close();
       await workerDb?.close();
       await apiDb.close();

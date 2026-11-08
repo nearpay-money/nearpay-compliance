@@ -5,7 +5,10 @@
  */
 import { sql, withTx } from "@nearpay-internal/db";
 import { fromUuid, newId, toUuid } from "@nearpay-internal/ids";
+import { getInternalOpsOperator } from "@nearpay-internal/spec";
+import { mockError } from "@nearpay-internal/testing";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { rememberAccountName } from "../../src/app/account-names.js";
 import { openCase } from "../../src/app/cases.js";
 import { createKybCase } from "../../src/app/kyb.js";
 import { expireApprovals } from "../../src/app/suspension.js";
@@ -359,6 +362,72 @@ describe("cases (console) and createInternalCase", () => {
     expect((await req("GET", `/ops/cases?severity=low&livemode=false&limit=100`, { token })).body.data).toEqual(
       expect.arrayContaining([expect.objectContaining({ id: test1.id })]),
     );
+  });
+
+  it("spec 0.2.1: subject filter (exact subject.id) and account_display_name", async () => {
+    const live = await held(true);
+    const other = await held(true);
+    await withTx(s.admin.db, (tx) => rememberAccountName(tx, live.acct, "Subject Shop", 4));
+    const token = await consoleToken(alice, { stepUp: false });
+    const r = await req("GET", `/ops/cases?subject=${live.ex}&status=open`, { token });
+    expect(r.status).toBe(200);
+    const data = r.body.data as Record<string, unknown>[];
+    expect(data).toHaveLength(1);
+    expect(data[0]).toMatchObject({ id: live.id, account_display_name: "Subject Shop" });
+    expect((await req("GET", `/ops/cases?subject=${live.ex.slice(0, -1)}`, { token })).body.data).toEqual([]);
+    const one = await req("GET", `/ops/cases/${other.id}`, { token });
+    expect(one.body.account_display_name).toBeNull(); // no account event seen yet
+    expect((await req("GET", `/ops/cases/${live.id}`, { token })).body.account_display_name).toBe("Subject Shop");
+    const idx = await sql<{ indexdef: string }>`
+      select indexdef from pg_indexes where indexname = 'cases_subject_id'`.execute(s.admin.db);
+    expect(idx.rows[0]?.indexdef).toContain("(subject ->> 'id'::text)");
+  });
+
+  it("spec 0.2.1: the assignee must be an active operator (identity); identity down fails closed", async () => {
+    const c = await held();
+    const token = await consoleToken(alice);
+    const assign = (assignee: string) => req("POST", `/ops/cases/${c.id}/assign`, { body: { assignee }, token });
+    const revoked = newId("usr");
+    const unknown = newId("usr");
+    s.identity.on(getInternalOpsOperator, async (ctx) => {
+      if (ctx.params.id === unknown) mockError("resource_missing", { params: { object: "ops_operator", id: unknown } });
+      return {
+        user_id: ctx.params.id,
+        role: "ops" as const,
+        active: ctx.params.id !== revoked,
+        created_at: new Date().toISOString(),
+        revoked_at: ctx.params.id === revoked ? new Date().toISOString() : null,
+      };
+    });
+    try {
+      for (const u of [revoked, unknown]) {
+        const r = await assign(u);
+        expect(r.status).toBe(400);
+        expect(r.body.error).toMatchObject({ code: "invalid_request", param: "assignee" });
+      }
+      // the call carried compliance's service token (scope identity.operators.read, checked by the mock)
+      const call = s.identity.callsTo(getInternalOpsOperator).at(-1);
+      expect(call?.principal?.sub).toBe("compliance");
+      s.identity.on(getInternalOpsOperator, async () => mockError("api_error"));
+      const down = await assign(bob.sub);
+      expect(down.status).toBeGreaterThanOrEqual(500);
+      expect(down.body.error).toMatchObject({ code: "api_error" });
+      expect(down.headers["retry-after"]).toBe("5");
+      const row = await s.admin.db
+        .selectFrom("cases")
+        .select(["assignee", "status"])
+        .where("id", "=", toUuid(c.id, "case"))
+        .executeTakeFirstOrThrow();
+      expect(row).toEqual({ assignee: null, status: "open" });
+    } finally {
+      s.identity.on(getInternalOpsOperator, async (ctx) => ({
+        user_id: ctx.params.id,
+        role: "ops" as const,
+        active: true,
+        created_at: new Date().toISOString(),
+        revoked_at: null,
+      }));
+    }
   });
 
   it("assigns, comments and closes a review with a timeline, review.closed and operator actions", async () => {

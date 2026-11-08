@@ -4,7 +4,8 @@
  *
  * | subject                                         | handler                                          |
  * |-------------------------------------------------|--------------------------------------------------|
- * | evt.identity.account.created                    | KYB placeholder (`not_started`)                  |
+ * | evt.identity.account.created                    | KYB placeholder (`not_started`), display name    |
+ * | evt.identity.account.updated                    | display name (spec 0.2.1; version-ordered)       |
  * | evt.identity.settlement_destination.activated   | monitor the destination                          |
  * | evt.identity.settlement_destination.disabled    | stop monitoring                                  |
  * | evt.rails.execution.settled                     | post-screen the refund address / payer account   |
@@ -23,6 +24,7 @@ import { deadLetterSink, inboxHandler } from "@nearpay-internal/db";
 import { fromUuid, toUuid } from "@nearpay-internal/ids";
 import { ApiError } from "@nearpay-internal/service";
 import type { Subject } from "@nearpay-internal/spec";
+import { rememberAccountName } from "../app/account-names.js";
 import { openCase } from "../app/cases.js";
 import type { Compliance, Tx } from "../app/context.js";
 import { createKybCase } from "../app/kyb.js";
@@ -140,6 +142,12 @@ export function complianceHandlers(c: Compliance): Partial<Record<Subject, Event
     "evt.identity.account.created": h(async (tx, e) => {
       const a = e.data.object as { id: string; display_name?: string };
       await createKybCase(tx, a.id, a.display_name);
+      if (a.display_name) await rememberAccountName(tx, a.id, a.display_name, e.aggregate.version);
+    }),
+    // spec 0.2.1: display-name refresh (cases and the KYB queue); stale versions are ignored
+    "evt.identity.account.updated": h(async (tx, e) => {
+      const a = e.data.object as { id: string; display_name?: string };
+      if (a.display_name) await rememberAccountName(tx, a.id, a.display_name, e.aggregate.version);
     }),
     "evt.identity.settlement_destination.activated": h((tx, e) => monitorDestination(tx, e, true)),
     "evt.identity.settlement_destination.disabled": h((tx, e) => monitorDestination(tx, e, false)),

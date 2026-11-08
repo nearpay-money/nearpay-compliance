@@ -136,8 +136,20 @@ describe("POST /internal/screenings", () => {
       expect((second.body as { screening_id: string }).screening_id).toBe(
         (first.body as { screening_id: string }).screening_id,
       );
-      const rows = await s.admin.db.selectFrom("screenings").selectAll().where("subject_norm", "=", subject).execute();
-      expect(rows).toHaveLength(1);
+      // spec 0.2.1 `fresh: true` bypasses the cache: a new decision and a new screening record
+      const fresh = await screen({ subject, context: "refund", fresh: true });
+      expect(fresh.body).toMatchObject({ decision: "allow", cached: false });
+      expect((fresh.body as { screening_id: string }).screening_id).not.toBe(
+        (first.body as { screening_id: string }).screening_id,
+      );
+      expect((await screen({ subject, fresh: false })).body).toMatchObject({ cached: true });
+      const rows = await s.admin.db
+        .selectFrom("screenings")
+        .selectAll()
+        .where("subject_norm", "=", subject)
+        .orderBy("created_at")
+        .execute();
+      expect(rows).toHaveLength(2);
       const [row] = rows;
       expect(row && row.expires_at.getTime() - row.created_at.getTime()).toBeGreaterThan(23 * 3_600_000);
     });
