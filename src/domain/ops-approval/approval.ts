@@ -15,7 +15,15 @@
  * | pending | sweep   | now ≥ expires_at                                              | expired  |
  * | other   | any     | —                                                             | refused  |
  *
- * An approval therefore always involves two distinct operators, and never happens after expiry.
+ * An approval therefore involves two distinct operators — while the platform has two or more operators who
+ * can approve (`ops_admin`) — and never happens after expiry.
+ *
+ * **Adaptive rule (single-operator platforms, LLD §5.1).** The request records the number of active
+ * `ops_admin` operators identity signed into the token (`requestedAdmins`; unknown = two-person). When it
+ * was at most one, and still is at completion, the requester may approve their own request — only after
+ * the wait (`NP_OPS_SINGLE_OPERATOR_DELAY_S`), with a user verification performed after it (`authAt`) and
+ * a written reason. Revoking the other operator mid-action does not help (the request keeps its count);
+ * adding a second one re-enables the rule (the count at completion).
  */
 
 export type OpsRole = "ops" | "ops_admin";
@@ -26,6 +34,10 @@ export type ApprovalStatus = "pending" | "approved" | "rejected" | "expired";
 export interface Operator {
   readonly sub: string;
   readonly role: OpsRole;
+  /** Active `ops_admin` operators when identity minted the token (claim `ops_admins`); absent = unknown. */
+  readonly activeAdmins?: number;
+  /** Unix seconds of the operator's last user verification (claim `ops_auth_at`); absent = unknown. */
+  readonly authAt?: number;
 }
 
 export interface Approval {
@@ -33,6 +45,26 @@ export interface Approval {
   readonly status: ApprovalStatus;
   readonly requestedBy: string;
   readonly expiresAt: number;
+  /** When the request was made (ms). */
+  readonly requestedAt?: number;
+  /** Active approvers when it was made; null/absent = unknown (two-person). */
+  readonly requestedAdmins?: number | null;
+}
+
+/** Minimum length of the written reason of a single-operator completion (trimmed). */
+export const SINGLE_OPERATOR_REASON_MIN = 20;
+export const DEFAULT_SINGLE_OPERATOR_DELAY_SECONDS = 300;
+
+const single = (n: number | null | undefined): boolean => n !== null && n !== undefined && n <= 1;
+
+/** The request was made on a single-operator platform. */
+export function madeBySingleOperator(a: Approval): boolean {
+  return single(a.requestedAdmins) && a.requestedAt !== undefined;
+}
+
+/** When the requester may complete it alone (ms), or null when two persons are needed. */
+export function singleOperatorAvailableAt(a: Approval, delaySeconds: number): number | null {
+  return madeBySingleOperator(a) ? (a.requestedAt as number) + delaySeconds * 1000 : null;
 }
 
 export const DEFAULT_TTL_SECONDS = 24 * 3600;
@@ -71,20 +103,47 @@ export function requestAction(
 }
 
 export type DecideStep =
-  | { readonly kind: "approved" | "rejected" }
+  | { readonly kind: "approved" | "rejected"; readonly singleOperator?: boolean }
+  | { readonly kind: "refuse"; readonly error: "step_up_required" | "reason_required"; readonly reason: string }
   | { readonly kind: "expire"; readonly reason: "expired" | "state_changed" }
   | { readonly kind: "refuse"; readonly error: "approver_conflict"; readonly reason: string }
   | { readonly kind: "refuse"; readonly error: "state_conflict"; readonly reason: string };
 
-export function approve(a: Approval, approver: Operator, o: { suspended: boolean; now: number }): DecideStep {
+export function approve(
+  a: Approval,
+  approver: Operator,
+  o: { suspended: boolean; now: number; delaySeconds?: number; note?: string | undefined },
+): DecideStep {
   if (a.status !== "pending") return { kind: "refuse", error: "state_conflict", reason: `the request is ${a.status}` };
   if (approver.role !== "ops_admin")
     return { kind: "refuse", error: "approver_conflict", reason: "the approver must hold ops_admin." };
-  if (approver.sub === a.requestedBy)
+  const self = approver.sub === a.requestedBy;
+  if (self && !(madeBySingleOperator(a) && single(approver.activeAdmins)))
     return { kind: "refuse", error: "approver_conflict", reason: "the requester cannot approve their own request." };
   if (o.now >= a.expiresAt) return { kind: "expire", reason: "expired" };
   if (!actionApplies(a.action, o.suspended)) return { kind: "expire", reason: "state_changed" };
-  return { kind: "approved" };
+  if (!self) return { kind: "approved" };
+  // single-operator platform: the requester completes it alone under the guards
+  const availableAt = singleOperatorAvailableAt(a, o.delaySeconds ?? DEFAULT_SINGLE_OPERATOR_DELAY_SECONDS) as number;
+  if (o.now < availableAt)
+    return {
+      kind: "refuse",
+      error: "approver_conflict",
+      reason: `you are the only operator, so you can complete your own request from ${new Date(availableAt).toISOString()}.`,
+    };
+  if (approver.authAt === undefined || approver.authAt * 1000 < availableAt)
+    return {
+      kind: "refuse",
+      error: "step_up_required",
+      reason: "completing your own request needs a new confirmation after the wait.",
+    };
+  if ((o.note ?? "").trim().length < SINGLE_OPERATOR_REASON_MIN)
+    return {
+      kind: "refuse",
+      error: "reason_required",
+      reason: `completing your own request needs a written reason (at least ${SINGLE_OPERATOR_REASON_MIN} characters).`,
+    };
+  return { kind: "approved", singleOperator: true };
 }
 
 export function reject(a: Approval, decider: Operator, o: { now: number }): DecideStep {

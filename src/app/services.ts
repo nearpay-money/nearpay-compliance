@@ -42,6 +42,7 @@ import { jobHandlers, RECURRING } from "../workers/jobs.js";
 import { type Compliance, complianceMetrics } from "./context.js";
 import { sanctionsAgeHours } from "./sanctions.js";
 import type { ScreeningProvider, ScreeningProviderName } from "./screening-provider.js";
+import { logSingleOperatorPolicy } from "./single-operator-metrics.js";
 
 export interface ServiceDeps {
   keys?: KeySource;
@@ -63,7 +64,12 @@ export function screeningProvider(name: ScreeningProviderName): ScreeningProvide
 /** The bootstrap creates the logger and metrics, so they are attached right after the service exists. */
 function context(
   database: Database<DB>,
-  config: { piiKek: string; screeningProvider: ScreeningProviderName; opsApprovalTtlSeconds: number },
+  config: {
+    piiKek: string;
+    screeningProvider: ScreeningProviderName;
+    opsApprovalTtlSeconds: number;
+    opsSingleOperatorDelayS?: number;
+  },
 ): Mutable<Compliance> {
   return {
     db: database.db,
@@ -72,12 +78,14 @@ function context(
     metrics: undefined as unknown as Compliance["metrics"],
     provider: screeningProvider(config.screeningProvider),
     opsApprovalTtlSeconds: config.opsApprovalTtlSeconds,
+    singleOperatorDelaySeconds: config.opsSingleOperatorDelayS ?? 300,
   };
 }
 
 function attach(c: Mutable<Compliance>, service: Service): Compliance {
   c.log = service.log;
   c.metrics = complianceMetrics(service.metrics);
+  logSingleOperatorPolicy(service.log, c.singleOperatorDelaySeconds ?? 300);
   return c;
 }
 

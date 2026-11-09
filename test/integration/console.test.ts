@@ -754,6 +754,104 @@ describe("blocklist, screening and re-screening (console)", () => {
 // Merchant suspension — two-person rule
 // =============================================================================================
 
+describe("merchant suspension: single-operator platform (adaptive two-person rule)", () => {
+  const path = (acct: string) => `/ops/merchants/${acct}`;
+  const REASON = "only operator; fraud confirmed by chain analysis";
+  const nowS = () => Math.floor(Date.now() / 1000);
+  const ask = async (acct: string, opsAdmins?: number) =>
+    req("POST", `${path(acct)}/suspension_requests`, {
+      body: { action: "suspend", reason: "fraud reports" },
+      token: await consoleToken(bob, { ...(opsAdmins !== undefined ? { opsAdmins } : {}), authAt: nowS() }),
+    });
+  const waitPassed = (opa: string) =>
+    sql`update ops_approvals set requested_at = requested_at - interval '301 seconds' where id = ${toUuid(opa, "opa")}`.execute(
+      s.admin.db,
+    );
+  const approveAs = async (acct: string, opa: string, o: { opsAdmins?: number; authAt?: number; note?: string }) =>
+    req("POST", `${path(acct)}/suspension_requests/${opa}/approve`, {
+      body: o.note === undefined ? {} : { note: o.note },
+      token: await consoleToken(bob, {
+        ...(o.opsAdmins !== undefined ? { opsAdmins: o.opsAdmins } : {}),
+        authAt: o.authAt ?? nowS(),
+      }),
+    });
+
+  it("the only operator completes it after the wait with a new confirmation and a reason; marked single_operator", async () => {
+    const acct = newId("acct");
+    const r = await ask(acct, 1);
+    expect(r.status).toBe(201);
+    const opa = r.body.id as string;
+    expect(r.body.single_operator).toMatchObject({ used: false, reason_min_length: 20 });
+
+    const early = await approveAs(acct, opa, { opsAdmins: 1, note: REASON });
+    expect(early.status).toBe(403);
+    expect(early.body).toMatchObject({ error: { code: "approver_conflict" } });
+
+    await waitPassed(opa);
+    const stale = await approveAs(acct, opa, { opsAdmins: 1, note: REASON, authAt: nowS() - 302 });
+    expect(stale.status).toBe(401);
+    expect(stale.body).toMatchObject({ error: { code: "step_up_required" } });
+    expect((await approveAs(acct, opa, { opsAdmins: 1, note: "ok" })).status).toBe(400);
+
+    const ok = await approveAs(acct, opa, { opsAdmins: 1, note: REASON });
+    expect(ok.status).toBe(200);
+    expect(ok.body).toMatchObject({ suspended: true, actor: `${bob.sub}+${bob.sub}`, pending_request: null });
+    const row = await s.admin.db
+      .selectFrom("ops_approvals")
+      .selectAll()
+      .where("id", "=", toUuid(opa, "opa"))
+      .executeTakeFirstOrThrow();
+    expect(row).toMatchObject({
+      status: "approved",
+      single_operator: true,
+      requested_admins: 1,
+      decision_note: REASON,
+    });
+    expect(row.requested_by).toBe(toUuid(bob.sub, "usr"));
+    const actions = await opsActions(opa);
+    expect(actions.map((e) => e.data.object.action)).toEqual([
+      "ops_approval.requested",
+      "ops_approval.approved_single_operator",
+    ]);
+    expect(actions[1]?.data.object).toMatchObject({ single_operator: true, actor: { sub: bob.sub } });
+  });
+
+  it("requested with two approvers: the requester stays refused after the other is revoked", async () => {
+    const acct = newId("acct");
+    const opa = (await ask(acct, 2)).body.id as string;
+    await waitPassed(opa);
+    const self = await approveAs(acct, opa, { opsAdmins: 1, note: REASON });
+    expect(self.status).toBe(403);
+    expect(self.body).toMatchObject({ error: { code: "approver_conflict" } });
+  });
+
+  it("a second operator added since the request re-enables the rule; no claim fails closed", async () => {
+    const acct = newId("acct");
+    const opa = (await ask(acct, 1)).body.id as string;
+    await waitPassed(opa);
+    expect((await approveAs(acct, opa, { opsAdmins: 2, note: REASON })).status).toBe(403);
+    expect((await approveAs(acct, opa, { note: REASON })).status).toBe(403);
+    const acct2 = newId("acct");
+    const opa2 = (await ask(acct2)).body.id as string;
+    expect((await ask(acct2)).status).toBe(409);
+    await waitPassed(opa2);
+    expect((await approveAs(acct2, opa2, { opsAdmins: 1, note: REASON })).status).toBe(403);
+  });
+
+  it("the database refuses a marked self-approval of a two-person request and an unmarked one", async () => {
+    const acct = newId("acct");
+    const two = toUuid((await ask(acct, 2)).body.id as string, "opa");
+    const self = (extra: ReturnType<typeof sql>) =>
+      sql`update ops_approvals set status = 'approved', decided_by = requested_by, decided_role = 'ops_admin',
+          decided_at = now() + interval '1 second', decision_note = 'a reason', ${extra} where id = ${two}`.execute(
+        s.admin.db,
+      );
+    await expect(self(sql`single_operator = true`)).rejects.toThrow(/ops_approvals_approver_differs/);
+    await sql`update ops_approvals set requested_admins = 1 where id = ${two}`.execute(s.admin.db);
+    await expect(self(sql`single_operator = false`)).rejects.toThrow(/ops_approvals_approver_differs/);
+  });
+});
+
 describe("merchant suspension (two-person rule)", () => {
   const path = (acct: string) => `/ops/merchants/${acct}`;
 

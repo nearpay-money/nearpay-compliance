@@ -22,6 +22,11 @@ export interface OpsActionInput {
    * subject and chain, so the audit trail names what an entry was about — audit finding 10).
    */
   readonly details?: OpsActionDetails;
+  /**
+   * The requester completed a two-person action alone (single-operator platform): published as
+   * `single_operator: true` on the event object (an extra field of the open `OpsActionEvent`).
+   */
+  readonly singleOperator?: boolean;
 }
 
 /** Actor string stored on Stage 1 tables (`decided_by`, `case_events.actor`, …) for an operator. */
@@ -61,6 +66,7 @@ export async function recordOpsAction(c: Compliance, tx: Tx, op: Operator, a: Op
       account_id: a.accountUuid ? fromUuid("acct", a.accountUuid) : null,
       approval: a.approvalUuid ? fromUuid("opa", a.approvalUuid) : null,
       occurred_at: now.toISOString(),
+      ...(a.singleOperator ? { single_operator: true } : {}),
     },
   });
   c.log.info({ action: a.action, target: a.target, operator: op.sub, role: op.role }, "operator action");

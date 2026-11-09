@@ -17,7 +17,9 @@ import {
   type Operator,
   reject,
   requestAction,
+  SINGLE_OPERATOR_REASON_MIN,
   type SuspensionAction,
+  singleOperatorAvailableAt,
   sweep,
 } from "../domain/ops-approval/approval.js";
 import type { OpsApprovalsTable } from "../infra/db/schema.js";
@@ -35,8 +37,22 @@ function accountUuidOf(accountId: string): string {
   return toUuid(accountId, "acct");
 }
 
-export function renderApproval(r: ApprovalRow) {
+/**
+ * `OpsApproval` view. Extension (an open object; not yet in the spec): `single_operator` is present only for
+ * requests made on a single-operator platform — when the requester may complete it alone, or that they did.
+ */
+export function renderApproval(r: ApprovalRow, delaySeconds?: number) {
+  const at = singleOperatorAvailableAt(domainApproval(r), delaySeconds ?? 0);
   return {
+    ...(at !== null || r.single_operator
+      ? {
+          single_operator: {
+            used: r.single_operator,
+            available_at: at !== null && r.status === "pending" ? Math.ceil(at / 1000) : null,
+            reason_min_length: SINGLE_OPERATOR_REASON_MIN,
+          },
+        }
+      : {}),
     id: fromUuid("opa", r.id),
     object: "ops_approval" as const,
     action: r.action,
@@ -52,12 +68,16 @@ export function renderApproval(r: ApprovalRow) {
   };
 }
 
-const domainApproval = (r: ApprovalRow): Approval => ({
-  action: r.action,
-  status: r.status,
-  requestedBy: fromUuid("usr", r.requested_by),
-  expiresAt: r.expires_at.getTime(),
-});
+function domainApproval(r: ApprovalRow): Approval {
+  return {
+    action: r.action,
+    status: r.status,
+    requestedBy: fromUuid("usr", r.requested_by),
+    expiresAt: r.expires_at.getTime(),
+    requestedAt: r.requested_at.getTime(),
+    requestedAdmins: r.requested_admins,
+  };
+}
 
 async function isSuspended(db: Compliance["db"] | Tx, accountUuid: string, lock = false): Promise<boolean> {
   let q = db.selectFrom("account_flags").select("suspended").where("account_id", "=", accountUuid);
@@ -77,7 +97,7 @@ async function expireDue(tx: Tx, now: Date, accountUuid?: string): Promise<numbe
   return Number(r.numUpdatedRows);
 }
 
-async function suspensionView(_c: Compliance, db: Compliance["db"] | Tx, accountUuid: string) {
+async function suspensionView(c: Compliance, db: Compliance["db"] | Tx, accountUuid: string) {
   const now = await dbNow(db);
   const flags = await db
     .selectFrom("account_flags")
@@ -98,7 +118,7 @@ async function suspensionView(_c: Compliance, db: Compliance["db"] | Tx, account
     reason: flags?.reason ?? null,
     actor: flags ? flags.actor.split("+").map(apiActor).join("+") : null,
     updated_at: flags ? unix(flags.updated_at) : null,
-    pending_request: pending ? renderApproval(pending) : null,
+    pending_request: pending ? renderApproval(pending, c.singleOperatorDelaySeconds) : null,
   };
 }
 
@@ -152,10 +172,11 @@ export async function createSuspensionRequest(
         requested_role: op.role,
         requested_at: now,
         expires_at: new Date(step.expiresAt),
+        requested_admins: op.activeAdmins ?? null,
       })
       .returningAll()
       .executeTakeFirstOrThrow()) as ApprovalRow;
-    const view = renderApproval(row);
+    const view = renderApproval(row, c.singleOperatorDelaySeconds);
     await emitEvent(tx, {
       subject: "evt.compliance.account.action_requested",
       aggregate: { type: "ops_approval", id: view.id, version: 1 },
@@ -187,7 +208,7 @@ async function decide<T>(
   accountId: string,
   requestId: string,
   rule: (a: Approval, suspended: boolean, now: number) => DecideStep,
-  execute: (tx: Tx, row: ApprovalRow, now: Date) => Promise<T>,
+  execute: (tx: Tx, row: ApprovalRow, now: Date, step: DecideStep) => Promise<T>,
 ): Promise<T> {
   const accountUuid = accountUuidOf(accountId);
   if (!isId("opa", requestId)) throw ApiError.invalid(`${requestId} is not an ops approval id`, "request");
@@ -210,7 +231,11 @@ async function decide<T>(
           error:
             step.error === "approver_conflict"
               ? new ApiError("approver_conflict", { params: { reason: step.reason } })
-              : new ApiError("state_conflict", { params: { object: "ops_approval", state: row.status } }),
+              : step.error === "step_up_required"
+                ? new ApiError("step_up_required")
+                : step.error === "reason_required"
+                  ? ApiError.invalid(step.reason, "note")
+                  : new ApiError("state_conflict", { params: { object: "ops_approval", state: row.status } }),
         };
       case "expire":
         await tx.updateTable("ops_approvals").set({ status: "expired" }).where("id", "=", row.id).execute();
@@ -225,14 +250,19 @@ async function decide<T>(
           }),
         };
       default:
-        return { ok: true, value: await execute(tx, row, now) };
+        return { ok: true, value: await execute(tx, row, now, step) };
     }
   });
   if (!outcome.ok) throw outcome.error;
   return outcome.value;
 }
 
-/** `approveOpsSuspensionRequest` (ops_admin ≠ requester, step-up): approves and executes in one transaction. */
+/**
+ * `approveOpsSuspensionRequest` (ops_admin ≠ requester, step-up): approves and executes in one transaction.
+ * On a single-operator platform the requester may approve under the domain guards: the row is marked
+ * `single_operator`, the operator action is `ops_approval.approved_single_operator` and
+ * `nearpay_ops_single_operator_actions_total{action}` counts it.
+ */
 export async function approveSuspensionRequest(
   c: Compliance,
   op: Operator,
@@ -240,13 +270,17 @@ export async function approveSuspensionRequest(
   requestId: string,
   note: string | undefined,
 ) {
-  return decide(
+  let single: { action: string } | null = null;
+  const view = await decide(
     c,
     op,
     accountId,
     requestId,
-    (a, suspended, now) => approve(a, op, { suspended, now }),
-    async (tx, row, now) => {
+    (a, suspended, now) =>
+      approve(a, op, { suspended, now, delaySeconds: c.singleOperatorDelaySeconds, note: note ?? undefined }),
+    async (tx, row, now, step) => {
+      const solo = step.kind === "approved" && step.singleOperator === true;
+      if (solo) single = { action: row.action };
       await tx
         .updateTable("ops_approvals")
         .set({
@@ -255,6 +289,7 @@ export async function approveSuspensionRequest(
           decided_role: op.role,
           decided_at: now,
           decision_note: note ?? null,
+          single_operator: solo,
         })
         .where("id", "=", row.id)
         .where("status", "=", "pending")
@@ -269,15 +304,25 @@ export async function approveSuspensionRequest(
         `ops:${requester}+ops:${op.sub}`,
       );
       await recordOpsAction(c, tx, op, {
-        action: "ops_approval.approved",
+        action: solo ? "ops_approval.approved_single_operator" : "ops_approval.approved",
         target: { type: "ops_approval", id: fromUuid("opa", row.id) },
         accountUuid: row.account_id,
         approvalUuid: row.id,
         ...(note ? { note } : {}),
+        ...(solo ? { singleOperator: true, details: { single_operator: true, approval_action: row.action } } : {}),
       });
       return suspensionView(c, tx, row.account_id);
     },
   );
+  const done = single as { action: string } | null;
+  if (done) {
+    c.metrics.singleOperatorAction(done.action);
+    c.log.warn(
+      { acct: accountId, request: requestId, operator: op.sub, action: done.action, single_operator: true },
+      "ALERT two-person action completed by a single operator (one active ops_admin)",
+    );
+  }
+  return view;
 }
 
 /** `rejectOpsSuspensionRequest` (ops_admin; the requester may withdraw): executes nothing. */
@@ -314,7 +359,7 @@ export async function rejectSuspensionRequest(
         approvalUuid: row.id,
         note,
       });
-      return renderApproval(updated);
+      return renderApproval(updated, c.singleOperatorDelaySeconds);
     },
   );
 }

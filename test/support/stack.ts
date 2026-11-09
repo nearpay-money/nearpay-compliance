@@ -20,6 +20,7 @@ import {
   mintServiceToken,
   mintTestToken,
   mockPeer,
+  opsClaims,
   provisionServiceDatabase,
   type Started,
   startNats,
@@ -93,6 +94,7 @@ export async function startStack(o: StackOptions = {}): Promise<Stack> {
     sanctionsSourceUrl: o.sanctionsSourceUrl ?? "https://ofac.example/SDN_ADVANCED.XML",
     screeningProvider: "local" as const,
     opsApprovalTtlSeconds: 86_400,
+    opsSingleOperatorDelayS: 300,
   };
   const identity = await mockPeer({ service: "identity", routes: INTERNAL_ROUTES });
   identity.on(getInternalOpsOperator, async (ctx) => ({
@@ -209,15 +211,20 @@ export const newOperator = (role: "ops" | "ops_admin" = "ops"): TestOperator => 
  * Console token of an operator (kit `mintOpsToken`: `ptype=ops`, `ops_role`, the role's scopes) with a fresh
  * step-up unless `stepUp: false`; `role: null` mints a token without `ops_role` (must be refused).
  */
-export const consoleToken = (op: TestOperator, o: { stepUp?: boolean; scopes?: string[]; role?: null } = {}) =>
-  o.role === null
-    ? mintTestToken({ sub: op.sub, ptype: "ops", scp: o.scopes ?? [...OPS_SCOPES] })
-    : mintOpsToken({
-        sub: op.sub,
-        role: op.role,
-        ...(o.scopes ? { scopes: o.scopes } : {}),
-        stepUp: o.stepUp !== false,
-      });
+export const consoleToken = (
+  op: TestOperator,
+  o: { stepUp?: boolean; scopes?: string[]; role?: null; opsAdmins?: number; authAt?: number } = {},
+) => {
+  if (o.role === null) return mintTestToken({ sub: op.sub, ptype: "ops", scp: o.scopes ?? [...OPS_SCOPES] });
+  const t = { sub: op.sub, role: op.role, ...(o.scopes ? { scopes: o.scopes } : {}), stepUp: o.stepUp !== false };
+  if (o.opsAdmins === undefined && o.authAt === undefined) return mintOpsToken(t);
+  // identity's extra claims of the adaptive two-person rule
+  return mintTestToken({
+    ...opsClaims(t),
+    ...(o.opsAdmins !== undefined ? { ops_admins: o.opsAdmins } : {}),
+    ...(o.authAt !== undefined ? { ops_auth_at: o.authAt } : {}),
+  } as Parameters<typeof mintTestToken>[0]);
+};
 
 export const OWNER = newId("usr");
 
