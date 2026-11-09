@@ -23,8 +23,15 @@ const shared = {
   kybVendor: z.enum(["manual"]).optional(),
 };
 
+/**
+ * Adaptive two-person rule (LLD §5.1 "Single-operator platforms"): seconds the only operator waits after a
+ * suspend/reinstate request before completing it alone (0 allowed; below the request lifetime).
+ */
+const opsSingleOperatorDelayS = z.coerce.number().int().min(0).max(86_400).default(300);
+
 export const apiShape = {
   ...shared,
+  opsSingleOperatorDelayS,
   /** Identity's internal API (`getInternalOpsOperator`, spec 0.2.1) and compliance's client secret for it. */
   identityUrl: url(["http:", "https:"]),
   serviceClientSecret: secret(),
@@ -69,6 +76,16 @@ export type ApiConfig = z.output<z.ZodObject<typeof apiShape>>;
 export type WorkerConfig = z.output<z.ZodObject<typeof workerShape>>;
 export type OpsConfig = z.output<z.ZodObject<typeof opsShape>>;
 
-export const readApiConfig = () => loadConfig(apiShape);
+/** The wait must end before the request expires, or a single operator could never complete it. */
+export function checkSingleOperatorDelay(c: { opsSingleOperatorDelayS: number; opsApprovalTtlSeconds: number }): void {
+  if (c.opsSingleOperatorDelayS >= c.opsApprovalTtlSeconds)
+    throw new Error("NP_OPS_SINGLE_OPERATOR_DELAY_S must be shorter than NP_OPS_APPROVAL_TTL_SECONDS");
+}
+
+export const readApiConfig = () => {
+  const c = loadConfig(apiShape);
+  checkSingleOperatorDelay(c);
+  return c;
+};
 export const readWorkerConfig = () => loadConfig(workerShape);
 export const readOpsConfig = () => loadConfig(opsShape);

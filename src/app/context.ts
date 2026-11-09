@@ -6,11 +6,14 @@ import type { Subject } from "@nearpay-internal/spec";
 import type { OperatorDirectory } from "../infra/clients/identity.js";
 import type { DB } from "../infra/db/schema.js";
 import type { ScreeningProvider } from "./screening-provider.js";
+import { registerSingleOperatorCounter } from "./single-operator-metrics.js";
 
 export interface ComplianceMetrics {
   screenings(labels: { context: string; decision: string; provider: string; cached: string }): void;
   screeningSeconds(seconds: number): void;
   vendorUnavailable(): void;
+  /** `nearpay_ops_single_operator_actions_total{action}` (app/single-operator-metrics.ts). */
+  singleOperatorAction(action: string): void;
 }
 
 export interface Compliance {
@@ -22,6 +25,11 @@ export interface Compliance {
   readonly provider: ScreeningProvider;
   /** Lifetime of a pending two-person request (`NP_OPS_APPROVAL_TTL_SECONDS`, default 24 h). */
   readonly opsApprovalTtlSeconds: number;
+  /**
+   * Adaptive two-person rule (LLD §5.1): wait before the only operator may complete their own request
+   * (`NP_OPS_SINGLE_OPERATOR_DELAY_S`, default 300 s; 0 allowed here). Absent: 300 s.
+   */
+  readonly singleOperatorDelaySeconds?: number;
   /** Identity's operator read (api only; spec 0.2.1 `assignOpsCase` check). Absent → assignment fails closed. */
   readonly operators?: OperatorDirectory;
 }
@@ -32,6 +40,7 @@ export const noMetrics: ComplianceMetrics = {
   screenings() {},
   screeningSeconds() {},
   vendorUnavailable() {},
+  singleOperatorAction() {},
 };
 
 export function complianceMetrics(m: ServiceMetrics): ComplianceMetrics {
@@ -47,6 +56,7 @@ export function complianceMetrics(m: ServiceMetrics): ComplianceMetrics {
     screenings: (l) => total.inc(l),
     screeningSeconds: (s) => seconds.observe(s),
     vendorUnavailable: () => unavailable.inc(),
+    singleOperatorAction: registerSingleOperatorCounter(m),
   };
 }
 

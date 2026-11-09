@@ -14,6 +14,9 @@ export interface OpsClaims {
   readonly sub: string;
   readonly ops_role?: string | undefined;
   readonly step_up_until?: number | undefined;
+  /** Identity's extra claims of the adaptive two-person rule (active ops_admins, last verification). */
+  readonly ops_admins?: unknown;
+  readonly ops_auth_at?: unknown;
 }
 
 export interface OpsRouteRules {
@@ -38,5 +41,17 @@ export function checkOperator(claims: OpsClaims | null, route: OpsRouteRules, no
     return { ok: false, error: "permission_denied", reason: `call this route as ${role}` };
   if (route.stepUp && !(claims.step_up_until !== undefined && claims.step_up_until > nowSeconds))
     return { ok: false, error: "step_up_required", reason: "step-up is not fresh" };
-  return { ok: true, operator: { sub: claims.sub, role } };
+  // malformed extra claims count as absent (two-person applies; fail closed)
+  const int = (v: unknown) => (typeof v === "number" && Number.isInteger(v) && v >= 0 ? v : undefined);
+  const admins = int(claims.ops_admins);
+  const authAt = int(claims.ops_auth_at);
+  return {
+    ok: true,
+    operator: {
+      sub: claims.sub,
+      role,
+      ...(admins !== undefined ? { activeAdmins: admins } : {}),
+      ...(authAt !== undefined ? { authAt } : {}),
+    },
+  };
 }

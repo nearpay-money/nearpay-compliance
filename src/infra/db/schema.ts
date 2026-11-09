@@ -171,6 +171,10 @@ export interface OpsApprovalsTable {
   >;
   decided_at: NullableTimestamp;
   decision_note: ColumnType<string | null, string | null | undefined, string | null>;
+  /** Migration 0005: active `ops_admin` operators when requested (null: unknown → two-person). */
+  requested_admins: ColumnType<number | null, number | null | undefined, number | null>;
+  /** Migration 0005: approved by its requester on a single-operator platform. */
+  single_operator: ColumnType<boolean, boolean | undefined, boolean>;
   expires_at: Timestamp;
 }
 
