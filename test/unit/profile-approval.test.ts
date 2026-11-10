@@ -23,11 +23,10 @@ const complete = {
 };
 
 describe("KYB profile", () => {
-  it("starts empty with every required field missing (website is optional)", () => {
+  it("starts empty with every required field missing (website and registration number are optional)", () => {
     expect(missingFields(emptyProfile())).toEqual([
       "legal_name",
       "country_of_incorporation",
-      "registration_number",
       "business_type",
       "business_address",
       "representative",
@@ -50,6 +49,8 @@ describe("KYB profile", () => {
       },
     });
     expect(missingFields(profile)).toEqual([]);
+    // open onboarding (ADR-0024): no register number is still a complete declaration
+    expect(missingFields({ ...profile, registration_number: null })).toEqual([]);
     expect(changed).not.toContain("website");
     expect(mergeProfile(profile, {}).changed).toEqual([]);
     expect(mergeProfile(profile, { legal_name: "Acme Trading Ltd" }).changed).toEqual([]);
@@ -78,7 +79,6 @@ describe("KYB profile", () => {
     });
     expect(missingFields(other.profile)).toEqual([
       "country_of_incorporation",
-      "registration_number",
       "business_type",
       "expected_monthly_volume",
     ]);

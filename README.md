@@ -60,19 +60,20 @@ nearpay-compliance/
 
 ## Configuration
 
-| Variable                                | Process          | Meaning                                                                                 |
-| --------------------------------------- | ---------------- | --------------------------------------------------------------------------------------- |
-| `NP_DB_URL_FILE`                        | all              | Database URL (app role for `api`/`worker`/ops, migrator role for `migrate`)             |
-| `NP_PII_KEK_FILE`                       | api, worker      | 32-byte KEK (base64 or hex) for case notes and idempotency responses at rest            |
-| `NP_JWKS_URL`                           | api              | identity's JWKS (verifies service, session and ops tokens)                              |
-| `NP_NATS_URL`                           | worker           | NATS JetStream                                                                          |
-| `NP_SANCTIONS_SOURCE_URL`               | worker, ops      | OFAC SDN advanced XML (default: the Sanctions List Service URL; `file:` for air-gapped) |
-| `NP_SANCTIONS_REFRESH`                  | worker           | Daily download at 03:00 UTC and on first start (default `true`)                         |
-| `NP_SANCTIONS_TIMEOUT_MS`               | worker, ops      | Download timeout (default 300000; the file is ~128 MB)                                  |
-| `NP_SCREENING_PROVIDER`                 | all              | `local` (OFAC list + blocklist behind the vendor-neutral interface; ADR-0020)           |
-| `NP_OPS_APPROVAL_TTL_SECONDS`           | api, worker, ops | Pending two-person suspension request lifetime (default 86400)                          |
-| `NP_SCREENING_VENDOR` / `NP_KYB_VENDOR` | all              | Deprecated (`none` / `manual` still accepted)                                           |
-| `NP_OPS_ACTOR`                          | ops              | Default actor recorded by the ops CLI (`--actor` overrides; else `cli@<hostname>`)      |
+| Variable                                | Process          | Meaning                                                                                     |
+| --------------------------------------- | ---------------- | ------------------------------------------------------------------------------------------- |
+| `NP_DB_URL_FILE`                        | all              | Database URL (app role for `api`/`worker`/ops, migrator role for `migrate`)                 |
+| `NP_PII_KEK_FILE`                       | api, worker      | 32-byte KEK (base64 or hex) for case notes and idempotency responses at rest                |
+| `NP_JWKS_URL`                           | api              | identity's JWKS (verifies service, session and ops tokens)                                  |
+| `NP_NATS_URL`                           | worker           | NATS JetStream                                                                              |
+| `NP_SANCTIONS_SOURCE_URL`               | worker, ops      | OFAC SDN advanced XML (default: the Sanctions List Service URL; `file:` for air-gapped)     |
+| `NP_SANCTIONS_REFRESH`                  | worker           | Daily download at 03:00 UTC and on first start (default `true`)                             |
+| `NP_SANCTIONS_TIMEOUT_MS`               | worker, ops      | Download timeout (default 300000; the file is ~128 MB)                                      |
+| `NP_SCREENING_PROVIDER`                 | all              | `local` (OFAC list + blocklist behind the vendor-neutral interface; ADR-0020)               |
+| `NP_OPS_APPROVAL_TTL_SECONDS`           | api, worker, ops | Pending two-person suspension request lifetime (default 86400)                              |
+| `NP_KYB_MODE`                           | api, worker      | `auto` (default; ADR-0024 open onboarding: system decides at once) or `manual` (ops review) |
+| `NP_SCREENING_VENDOR` / `NP_KYB_VENDOR` | all              | Deprecated (`none` / `manual` still accepted)                                               |
+| `NP_OPS_ACTOR`                          | ops              | Default actor recorded by the ops CLI (`--actor` overrides; else `cli@<hostname>`)          |
 
 ## Behaviour
 
@@ -80,7 +81,7 @@ nearpay-compliance/
 - **OFAC list** (`sanctions.refresh`): downloads the SDN advanced XML (follows the 302 to the signed S3 URL), streams it, extracts every "Digital Currency Address - <CODE>" feature (the type ids are read from the document), and replaces the list in one transaction with the diff logged. An empty result is refused; a failed download keeps the previous list; `nearpay_compliance_sanctions_list_age_hours` alerts after 48 h.
 - **Post-screening** (consumers): `execution.settled` re-checks the refund address (an Intents refund is a NEAR account) and `agent_payment.settled` the payer, without the cache; a hit opens a `post_screen_hit` review (`review.opened`). The payment stands (non-custodial, INV-1).
 - **Cases**: holds (`execution.held`) and sentinel audit mismatches (critical in live mode) open reviews; destination blocks open `screening_hit` cases. One open case per kind and subject; notes are envelope-encrypted.
-- **KYB**: `account.created` opens `not_started`; the owner starts it (`POST /v1/account/kyb` → `pending`); ops decide it (`POST /internal/kyb_cases/{acct}/decision` with an ops token, or `ops.js kyb-decide`), which emits `kyb.approved|rejected|needs_info` for identity.
+- **KYB**: `account.created` opens `not_started`; the owner declares the details and submits them (`POST /v1/account/kyb/submit` → `pending`, `kyb.submitted`). With `NP_KYB_MODE=auto` (default, ADR-0024) the same transaction records the system's decision (actor `system`): `approved` with reason `auto-approved: open onboarding (ADR-0024)`, or `rejected` with `auto-rejected: geo_blocked (…)` when the business country/region is in the geo policy; the `kyb.auto_decide` job (every minute) decides complete cases still `pending`. With `manual`, ops decide it (console, `POST /internal/kyb_cases/{acct}/decision` with an ops token, or `ops.js kyb-decide`). Either way `kyb.approved|rejected|needs_info` goes to identity; ops can reject (abuse) or reverse a rejection in both modes. `registration_number` is optional.
 - **Destinations**: activations are monitored; a blocklist entry or the daily re-screen blocks a matching live destination (`destination.blocked`, identity disables it).
 - **Geo policy** (`GET /internal/geo-policy`, scope `compliance.read`): blocked countries and regions are data; `geo-policy-set` emits `policy.updated` (payments refreshes).
 

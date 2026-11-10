@@ -2,7 +2,8 @@
  * Self-declared KYB profile (compliance LLD §5, ADR-0020 decision 3). Pure.
  *
  * Minimum business details, declared by the owner: no documents, no vendor. Drafts may be partial;
- * submission needs every field except `website`. `PATCH` semantics: an absent field keeps its value,
+ * submission needs every field except `website` and `registration_number` (open onboarding, ADR-0024:
+ * a business without a register number can still declare itself). `PATCH` semantics: an absent field keeps its value,
  * `null` clears it, an address replaces the stored one as a whole.
  */
 import type { KybProfile as KybProfileSchema, KybProfileUpdate as KybProfileUpdateSchema } from "@nearpay/spec";
@@ -23,8 +24,8 @@ export const PROFILE_FIELDS = [
 ] as const satisfies readonly (keyof KybProfile)[];
 export type ProfileField = (typeof PROFILE_FIELDS)[number];
 
-/** Optional at submission: a business may have no website. */
-const OPTIONAL: ReadonlySet<ProfileField> = new Set(["website"]);
+/** Optional at submission: a business may have no website and no register number (ADR-0024). */
+export const OPTIONAL_FIELDS: ReadonlySet<ProfileField> = new Set(["website", "registration_number"]);
 
 export function emptyProfile(): KybProfile {
   return {
@@ -82,7 +83,7 @@ export function mergeProfile(
 
 /** Required fields that are still missing (submission is refused with `kyb_profile_incomplete`). */
 export function missingFields(p: KybProfile): ProfileField[] {
-  return PROFILE_FIELDS.filter((f) => !OPTIONAL.has(f) && p[f] === null);
+  return PROFILE_FIELDS.filter((f) => !OPTIONAL_FIELDS.has(f) && p[f] === null);
 }
 
 /** Parses a stored profile defensively: unknown keys are dropped, missing keys are null. */

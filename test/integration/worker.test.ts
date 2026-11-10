@@ -359,7 +359,6 @@ describe("Stage 2 events reach the bus", () => {
       {
         legal_name: "Bus Test Ltd",
         country_of_incorporation: "DE",
-        registration_number: "HRB 1",
         business_type: "company",
         business_address: { line1: "Hauptstr. 1", city: "Berlin", country: "DE" },
         representative: { name: "Max Muster", title: "Geschäftsführer" },
@@ -371,6 +370,14 @@ describe("Stage 2 events reach the bus", () => {
     const sub = await probe.next("evt.compliance.kyb.submitted", (e) => e.aggregate.id === acct);
     expect(sub.data.object).toMatchObject({ account_id: acct, status: "pending" });
     expect(JSON.stringify(sub)).not.toContain("Bus Test");
+    // open onboarding (ADR-0024): the system's approval follows on the bus, no registration number needed
+    const approved = await probe.next("evt.compliance.kyb.approved", (e) => e.aggregate.id === acct);
+    expect(approved.data.object).toMatchObject({
+      account_id: acct,
+      status: "approved",
+      reason: "auto-approved: open onboarding (ADR-0024)",
+    });
+    expect(approved.aggregate.version).toBe(sub.aggregate.version + 1);
 
     const op = { sub: newId("usr"), role: "ops" as const };
     const req = await createSuspensionRequest(s.compliance, op, acct, "suspend", "chargeback ring");
