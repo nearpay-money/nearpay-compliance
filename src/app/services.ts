@@ -34,6 +34,7 @@ import { STREAMS, type Subject } from "@nearpay-internal/spec";
 import { complianceRoutes } from "../api/routes.js";
 import type { ApiConfig, WorkerConfig } from "../config.js";
 import { complianceHandlers, deadLetters } from "../consumers/handlers.js";
+import type { KybMode } from "../domain/kyb-case/auto.js";
 import { complianceServiceToken, httpOperatorDirectory, type OperatorDirectory } from "../infra/clients/identity.js";
 import { MIGRATIONS_DIR } from "../infra/db/migrations.js";
 import type { DB } from "../infra/db/schema.js";
@@ -69,6 +70,7 @@ function context(
     screeningProvider: ScreeningProviderName;
     opsApprovalTtlSeconds: number;
     opsSingleOperatorDelayS?: number;
+    kybMode?: KybMode;
   },
 ): Mutable<Compliance> {
   return {
@@ -79,6 +81,7 @@ function context(
     provider: screeningProvider(config.screeningProvider),
     opsApprovalTtlSeconds: config.opsApprovalTtlSeconds,
     singleOperatorDelaySeconds: config.opsSingleOperatorDelayS ?? 300,
+    kybMode: config.kybMode ?? "auto",
   };
 }
 
@@ -86,6 +89,7 @@ function attach(c: Mutable<Compliance>, service: Service): Compliance {
   c.log = service.log;
   c.metrics = complianceMetrics(service.metrics);
   logSingleOperatorPolicy(service.log, c.singleOperatorDelaySeconds ?? 300);
+  service.log.info({ kyb_mode: c.kybMode ?? "auto" }, "KYB mode (NP_KYB_MODE; ADR-0024)");
   return c;
 }
 

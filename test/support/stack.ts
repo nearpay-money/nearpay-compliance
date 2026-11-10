@@ -60,6 +60,8 @@ export interface Stack {
     url: string,
     o?: { body?: unknown; token?: string; headers?: Record<string, string> },
   ): Promise<{ status: number; body: unknown }>;
+  /** Switches `NP_KYB_MODE` of the running api (and worker) without a restart (tests of both modes). */
+  setKybMode(mode: "auto" | "manual"): void;
   /** Imports the recorded OFAC sample. */
   importSample(): Promise<void>;
   publishEvent(e: Envelope): Promise<void>;
@@ -72,6 +74,8 @@ export interface StackOptions {
   fetch?: typeof fetch;
   sanctionsRefresh?: boolean;
   sanctionsSourceUrl?: string;
+  /** `NP_KYB_MODE` (default `auto`, ADR-0024). */
+  kybMode?: "auto" | "manual";
 }
 
 export async function startStack(o: StackOptions = {}): Promise<Stack> {
@@ -95,6 +99,7 @@ export async function startStack(o: StackOptions = {}): Promise<Stack> {
     screeningProvider: "local" as const,
     opsApprovalTtlSeconds: 86_400,
     opsSingleOperatorDelayS: 300,
+    kybMode: o.kybMode ?? ("auto" as const),
   };
   const identity = await mockPeer({ service: "identity", routes: INTERNAL_ROUTES });
   identity.on(getInternalOpsOperator, async (ctx) => ({
@@ -154,6 +159,10 @@ export async function startStack(o: StackOptions = {}): Promise<Stack> {
         headers: { ...(token === "" ? {} : { "x-nearpay-token": token }), ...(opts.headers ?? {}) },
       });
       return { status: r.statusCode, body: r.body ? JSON.parse(r.body) : undefined };
+    },
+    setKybMode(mode) {
+      (compliance as { kybMode?: string }).kybMode = mode;
+      if (worker) (worker.compliance as { kybMode?: string }).kybMode = mode;
     },
     async importSample() {
       await importSanctions(compliance, createReadStream(SAMPLE_SDN));

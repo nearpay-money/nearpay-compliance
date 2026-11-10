@@ -8,6 +8,7 @@
  * | destinations.rescreen | daily 04:00 UTC | screen active live destinations; a block disables them + case   |
  * |                       | + console       | (`createOpsRescreen` queues it for one account or all)          |
  * | ops_approvals.expire  | every 15 min    | pending two-person requests past their expiry → `expired`       |
+ * | kyb.auto_decide       | every minute    | auto mode (ADR-0024): decide complete cases still `pending`     |
  * | purge.screenings      | daily 05:00 UTC | delete screenings older than the policy retention               |
  * | kit.purge             | hourly          | published outbox, old inbox rows, expired idempotency keys       |
  */
@@ -16,6 +17,7 @@ import type { JobContext, JobHandler } from "@nearpay-internal/db";
 import { purgeKitTables, type RecurringJob, sql, withTx } from "@nearpay-internal/db";
 import { blockDestination } from "../app/admin.js";
 import { type Compliance, dbNow } from "../app/context.js";
+import { autoDecidePending } from "../app/kyb.js";
 import { refreshSanctions } from "../app/sanctions.js";
 import { screen } from "../app/screening.js";
 import { expireApprovals } from "../app/suspension.js";
@@ -28,6 +30,7 @@ export const RECURRING: readonly RecurringJob[] = [
   { kind: "destinations.rescreen", everyMs: DAY, offsetMs: 4 * HOUR },
   { kind: "purge.screenings", everyMs: DAY, offsetMs: 5 * HOUR },
   { kind: "ops_approvals.expire", everyMs: 15 * 60_000 },
+  { kind: "kyb.auto_decide", everyMs: 60_000 },
   { kind: "kit.purge", everyMs: HOUR },
 ];
 
@@ -116,6 +119,10 @@ export function jobHandlers(c: Compliance, o: JobOptions): Record<string, JobHan
     },
     "ops_approvals.expire": async () => {
       await expireApprovals(c);
+    },
+    "kyb.auto_decide": async () => {
+      const r = await autoDecidePending(c);
+      if (r.decided > 0) c.log.info(r, "pending KYB cases decided automatically");
     },
     "purge.screenings": async () => {
       const r = await sql`delete from screenings

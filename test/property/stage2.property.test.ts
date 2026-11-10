@@ -126,13 +126,13 @@ describe("KYB status machine (owner + console)", () => {
     );
   });
 
-  it("approved is only entered from pending, with a complete declaration that was submitted", () => {
+  it("approved is only entered from pending (or a reversed rejection), with a complete declaration that was submitted", () => {
     fc.assert(
       fc.property(fc.array(kybCmd(false), { maxLength: 30 }), (cmds) => {
         runKyb(cmds, (before, cmd, after) => {
           if (after.status === "approved" && before.status !== "approved") {
             expect(cmd).toMatchObject({ kind: "console", d: "approved" });
-            expect(before.status).toBe("pending");
+            expect(["pending", "rejected"]).toContain(before.status);
             expect(missingFields(after.profile)).toEqual([]);
             expect(after.submittedComplete).toBe(true);
           }

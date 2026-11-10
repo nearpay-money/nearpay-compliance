@@ -1,8 +1,11 @@
 /**
- * KYB cases (compliance LLD §5, ADR-0020 decision 3): self-declared minimum business details, decided
- * by NearPay ops. Created when identity creates an account (or on the owner's first visit), edited and
- * submitted by the owner from the dashboard, decided by ops in the console (`decideOpsKybCase`) or with
- * the Stage 1 manual path (ops CLI, `POST /internal/kyb_cases/{id}/decision`).
+ * KYB cases (compliance LLD §5, ADR-0020 decision 3, ADR-0024): self-declared minimum business details.
+ * Created when identity creates an account (or on the owner's first visit), edited and submitted by the
+ * owner from the dashboard. `NP_KYB_MODE=auto` (default, open onboarding): the system decides the
+ * submission in the same transaction (approved; rejected on a geo-policy hit) — no NearPay approval step;
+ * the `kyb.auto_decide` job sweeps any case left `pending` (e.g. submitted while the mode was `manual`).
+ * `manual`: ops decide in the console (`decideOpsKybCase`) or with the Stage 1 manual path (ops CLI,
+ * `POST /internal/kyb_cases/{id}/decision`). Both paths stay available in auto mode for abuse (reject).
  *
  * Every state change writes the case, a transition and its outbox row in one transaction. The profile
  * is personal data (a sole proprietor's legal name, the representative): envelope-encrypted at rest,
@@ -11,6 +14,7 @@
 import { type Selectable, sql, withTx } from "@nearpay-internal/db";
 import { fromUuid, isId, toUuid, uuidv7 } from "@nearpay-internal/ids";
 import { ApiError } from "@nearpay-internal/service";
+import { autoDecide, type KybMode, SYSTEM_ACTOR } from "../domain/kyb-case/auto.js";
 import {
   decideConsole,
   decideKyb as decideStep,
@@ -34,6 +38,10 @@ import { apiActor } from "./cases.js";
 import { type Compliance, dbNow, emitEvent, type Tx } from "./context.js";
 import { operatorActor, recordOpsAction } from "./ops-actions.js";
 import { type Page, pageOf } from "./paging.js";
+import { currentPolicy } from "./screening.js";
+
+/** `NP_KYB_MODE` (absent → `auto`, open onboarding). */
+export const kybModeOf = (c: Pick<Compliance, "kybMode">): KybMode => c.kybMode ?? "auto";
 
 type KybRow = Selectable<KybCasesTable>;
 
@@ -222,8 +230,57 @@ export async function submitKyb(c: Compliance, accountId: string, userId: string
       previous: { status: row.status },
     });
     c.log.info({ acct: fromUuid("acct", accountUuid) }, "kyb submitted");
-    return ownerView(c, updated);
+    if (kybModeOf(c) === "manual") return ownerView(c, updated);
+    return ownerView(c, await applyAutoDecision(c, tx, updated, profile));
   });
+}
+
+/**
+ * Open onboarding (ADR-0024): the system's decision on a submitted, complete profile, in the caller's
+ * transaction — `approved` (identity turns live mode on from `kyb.approved`) or `rejected` with the
+ * `geo_blocked` reason code. Recorded like any decision: actor `system`, reason, transition, event.
+ */
+async function applyAutoDecision(c: Compliance, tx: Tx, row: KybRow, profile: KybProfile): Promise<KybRow> {
+  const policy = await currentPolicy(c);
+  const auto = autoDecide(profile, policy);
+  const updated = await applyDecision(c, tx, row, auto.decision, auto.reason, SYSTEM_ACTOR, null, "auto_decision");
+  if (auto.decision === "rejected")
+    c.log.warn({ acct: fromUuid("acct", row.account_id), code: auto.code }, "kyb auto-rejected by the geo policy");
+  return updated;
+}
+
+/**
+ * `kyb.auto_decide` job (auto mode only): decides cases still `pending` with a complete profile — cases
+ * submitted while the mode was `manual`, or before this release. Each case in its own transaction.
+ */
+export async function autoDecidePending(c: Compliance, limit = 200): Promise<{ decided: number }> {
+  if (kybModeOf(c) === "manual") return { decided: 0 };
+  const ids = await c.db
+    .selectFrom("kyb_cases")
+    .select("account_id")
+    .where("status", "=", "pending")
+    .orderBy("updated_at")
+    .limit(limit)
+    .execute();
+  let decided = 0;
+  for (const { account_id } of ids) {
+    const done = await withTx(c.db, async (tx) => {
+      const row = (await tx
+        .selectFrom("kyb_cases")
+        .selectAll()
+        .where("account_id", "=", account_id)
+        .forUpdate()
+        .executeTakeFirstOrThrow()) as KybRow;
+      if (row.status !== "pending") return false;
+      const profile = readProfile(c, row);
+      // a Stage 1 case started without details stays pending until the owner submits a complete profile
+      if (missingFields(profile).length > 0) return false;
+      await applyAutoDecision(c, tx, row, profile);
+      return true;
+    });
+    if (done) decided++;
+  }
+  return { decided };
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -251,13 +308,14 @@ async function applyDecision(
   reason: string,
   actor: string,
   requestedInfo: string | null,
+  cause: "ops_decision" | "auto_decision" = "ops_decision",
 ): Promise<KybRow> {
   const now = await dbNow(tx);
   const updated = await transition(
     tx,
     row,
     decision,
-    "ops_decision",
+    cause,
     actor,
     { decision_reason: reason, decided_by: actor, decided_at: now, requested_info: requestedInfo },
     { reason },
@@ -401,7 +459,10 @@ export async function getOpsKybCase(c: Compliance, accountId: string): Promise<O
   return opsView(c, c.db, row as KybRow);
 }
 
-/** Review queue (`listOpsKybCases`): `pending` by default, oldest submission first. Cursors are account ids. */
+/**
+ * Businesses list (`listOpsKybCases`; the console's former review queue): `pending` by default, oldest
+ * submission first; the console asks for `approved` / `rejected` in auto mode. Cursors are account ids.
+ */
 export async function listOpsKybCases(
   c: Compliance,
   f: {

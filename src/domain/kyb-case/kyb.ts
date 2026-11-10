@@ -1,14 +1,18 @@
 /**
  * KYB case state (compliance LLD §5, FR-CMP-01 as amended by ADR-0020, FR-ACC-05). Pure.
  *
- * Status values are unchanged since Stage 1; `pending` means "self-declared details submitted for review".
+ * Status values are unchanged since Stage 1; `pending` means "self-declared details submitted, not decided
+ * yet". With `NP_KYB_MODE=auto` (default, open onboarding, ADR-0024) the system decides a submission in the
+ * same transaction (`domain/kyb-case/auto.ts`: approved, or rejected on a geo-policy hit), so `pending` is
+ * only seen in `manual` mode (or for a Stage 1 case without details).
  *
  * | from                          | command                         | guard                    | to          | event          |
  * |-------------------------------|---------------------------------|--------------------------|-------------|----------------|
  * | (none)                        | account created / start / edit  | —                        | not_started | —              |
  * | not_started · needs_info      | owner edits the profile         | —                        | unchanged   | —              |
  * | not_started · needs_info      | owner submits                   | profile complete         | pending     | kyb.submitted  |
- * | pending                       | console: approved               | profile complete         | approved    | kyb.approved   |
+ * | pending (auto mode)           | system: auto decision           | profile complete         | approved · rejected | kyb.<D> |
+ * | pending · rejected            | console: approved               | profile complete         | approved    | kyb.approved   |
  * | pending · approved            | console: rejected               | —                        | rejected    | kyb.rejected   |
  * | pending · approved · rejected | console: needs_info             | `requested_info` given   | needs_info  | kyb.needs_info |
  * | D                             | console or manual: D            | —                        | unchanged (idempotent, no event)       |
@@ -62,7 +66,8 @@ export type ConsoleDecisionStep =
   | { readonly changed: false; readonly error: "state_conflict" | "requested_info_required" | "profile_incomplete" };
 
 const CONSOLE_FROM: Record<KybDecision, readonly KybStatus[]> = {
-  approved: ["pending"],
+  // `rejected`: an operator may reverse an abuse rejection or a geo auto-rejection (ADR-0024)
+  approved: ["pending", "rejected"],
   rejected: ["pending", "approved"],
   needs_info: ["pending", "approved", "rejected"],
 };

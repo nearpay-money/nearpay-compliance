@@ -2,6 +2,7 @@
 import { baseConfigShape, flag, loadConfig, secret, url } from "@nearpay-internal/service";
 import { z } from "zod";
 import { SCREENING_PROVIDERS } from "./app/screening-provider.js";
+import { KYB_MODES } from "./domain/kyb-case/auto.js";
 
 /** OFAC Sanctions List Service, SDN advanced XML (SP-15: 302 → a signed S3 URL). */
 export const OFAC_SDN_ADVANCED_URL =
@@ -18,6 +19,11 @@ const shared = {
    * digital-currency list + blocklist) is the only v1 value. Replaces `NP_SCREENING_VENDOR`.
    */
   screeningProvider: z.enum(SCREENING_PROVIDERS).default("local"),
+  /**
+   * `NP_KYB_MODE` (ADR-0024, LLD §8): `auto` (default) decides a submitted business at once — open
+   * onboarding, no NearPay approval; `manual` restores the ops review (console Businesses list).
+   */
+  kybMode: z.enum(KYB_MODES).default("auto"),
   /** Deprecated Stage 1 keys, still accepted with their only values so older Compose files keep booting. */
   screeningVendor: z.enum(["none"]).optional(),
   kybVendor: z.enum(["manual"]).optional(),

@@ -3,6 +3,7 @@ import type { EnvelopeCipher, Kysely, Transaction } from "@nearpay-internal/db";
 import { emit, sql } from "@nearpay-internal/db";
 import type { Logger, ServiceMetrics } from "@nearpay-internal/service";
 import type { Subject } from "@nearpay-internal/spec";
+import type { KybMode } from "../domain/kyb-case/auto.js";
 import type { OperatorDirectory } from "../infra/clients/identity.js";
 import type { DB } from "../infra/db/schema.js";
 import type { ScreeningProvider } from "./screening-provider.js";
@@ -30,6 +31,11 @@ export interface Compliance {
    * (`NP_OPS_SINGLE_OPERATOR_DELAY_S`, default 300 s; 0 allowed here). Absent: 300 s.
    */
   readonly singleOperatorDelaySeconds?: number;
+  /**
+   * `NP_KYB_MODE` (ADR-0024): `auto` (default, open onboarding — the system decides a submitted profile at
+   * once) or `manual` (ops review in the console). Absent: `auto`.
+   */
+  readonly kybMode?: KybMode;
   /** Identity's operator read (api only; spec 0.2.1 `assignOpsCase` check). Absent → assignment fails closed. */
   readonly operators?: OperatorDirectory;
 }

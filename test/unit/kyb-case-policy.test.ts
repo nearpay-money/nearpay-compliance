@@ -41,7 +41,9 @@ describe("KYB case", () => {
   it("console decisions follow the state table", () => {
     const ok = { requestedInfo: "add your register number", profileComplete: true };
     expect(decideConsole("pending", "approved", ok)).toEqual({ changed: true, to: "approved" });
-    for (const s of ["not_started", "needs_info", "rejected"] as const)
+    // ADR-0024: an operator may reverse an abuse rejection or a geo auto-rejection
+    expect(decideConsole("rejected", "approved", ok)).toEqual({ changed: true, to: "approved" });
+    for (const s of ["not_started", "needs_info"] as const)
       expect(decideConsole(s, "approved", ok)).toMatchObject({ error: "state_conflict" });
     expect(decideConsole("pending", "rejected", ok)).toEqual({ changed: true, to: "rejected" });
     expect(decideConsole("approved", "rejected", ok)).toEqual({ changed: true, to: "rejected" });

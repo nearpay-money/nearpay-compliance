@@ -1,6 +1,7 @@
 /**
  * Stage 2 routes over HTTP (LLD §5, §5.1): the self-declared KYB profile (dashboard), the identity read,
- * payments' reconciliation cases, and every console route — KYB queue and decisions, cases, blocklist,
+ * payments' reconciliation cases, open onboarding (NP_KYB_MODE=auto, ADR-0024) and every console route —
+ * Businesses list and decisions (manual mode and abuse), cases, blocklist,
  * screening and re-screening, merchant suspension with the two-person rule — with their operator actions.
  */
 import { sql, withTx } from "@nearpay-internal/db";
@@ -10,7 +11,7 @@ import { mockError } from "@nearpay-internal/testing";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { rememberAccountName } from "../../src/app/account-names.js";
 import { openCase } from "../../src/app/cases.js";
-import { createKybCase } from "../../src/app/kyb.js";
+import { autoDecidePending, createKybCase } from "../../src/app/kyb.js";
 import { expireApprovals } from "../../src/app/suspension.js";
 import {
   consoleToken,
@@ -144,7 +145,7 @@ describe("KYB profile (dashboard)", () => {
     ).toBe(403);
   });
 
-  it("submission needs step-up, the declaration and every required field; emits kyb.submitted", async () => {
+  it("submission needs step-up, the declaration and every required field; auto mode approves it at once", async () => {
     const acct = newId("acct");
     const token = await sessionToken(acct, "owner", { stepUp: true });
     expect(
@@ -156,18 +157,23 @@ describe("KYB profile (dashboard)", () => {
     const incomplete = await req("POST", "/v1/account/kyb/submit", { body: { declaration: true }, token });
     expect(incomplete.status).toBe(400);
     expect(incomplete.body).toMatchObject({ error: { code: "kyb_profile_incomplete" } });
-    expect((incomplete.body.error as { message: string }).message).toContain("registration_number");
+    expect((incomplete.body.error as { message: string }).message).toContain("country_of_incorporation");
     expect((incomplete.body.error as { message: string }).message).not.toContain("website");
+    expect((incomplete.body.error as { message: string }).message).not.toContain("registration_number");
 
     await req("PATCH", "/v1/account/kyb", { body: COMPLETE, token });
     const ok = await req("POST", "/v1/account/kyb/submit", { body: { declaration: true }, token });
     expect(ok.status).toBe(200);
-    expect(ok.body).toMatchObject({ status: "pending", editable: false });
+    expect(ok.body).toMatchObject({ status: "approved", editable: false });
     expect(typeof ok.body.submitted_at).toBe("number");
+    expect(typeof ok.body.decided_at).toBe("number");
     const ev = (await outboxOf(s, "evt.compliance.kyb.submitted")).filter((e) => e.aggregate.id === acct);
     expect(ev).toHaveLength(1);
     expect(ev[0]?.data.object).toMatchObject({ account_id: acct, status: "pending" });
     expect(JSON.stringify(ev[0])).not.toContain("Acme Trading");
+    const approved = (await outboxOf(s, "evt.compliance.kyb.approved")).filter((e) => e.aggregate.id === acct);
+    expect(approved).toHaveLength(1);
+    expect(approved[0]?.aggregate.version).toBeGreaterThan(ev[0]?.aggregate.version ?? Infinity);
 
     expect((await req("POST", "/v1/account/kyb/submit", { body: { declaration: true }, token })).status).toBe(409);
     expect((await req("PATCH", "/v1/account/kyb", { body: { legal_name: "X" }, token })).status).toBe(409);
@@ -185,10 +191,10 @@ describe("KYB profile (dashboard)", () => {
     expect(r.status).toBe(200);
     expect(r.body).toMatchObject({
       account_id: acct,
-      status: "pending",
+      status: "approved",
       profile: { legal_name: "Acme Trading Ltd", country_of_incorporation: "GB" },
-      decided_at: null,
     });
+    expect(typeof r.body.decided_at).toBe("string");
     expect((await req("GET", `/internal/kyb_cases/${acct}`, { token: await mintServiceToken("notify") })).status).toBe(
       403,
     );
@@ -202,7 +208,131 @@ describe("KYB profile (dashboard)", () => {
 // KYB — console
 // =============================================================================================
 
-describe("KYB queue and decisions (console)", () => {
+describe("open onboarding (NP_KYB_MODE=auto, ADR-0024)", () => {
+  const transitions = async (acct: string) =>
+    s.admin.db
+      .selectFrom("kyb_case_transitions as t")
+      .innerJoin("kyb_cases as k", "k.id", "t.kyb_case_id")
+      .select(["t.from_state", "t.to_state", "t.cause", "t.actor", "t.evidence"])
+      .where("k.account_id", "=", toUuid(acct, "acct"))
+      .orderBy("t.created_at")
+      .orderBy("t.id")
+      .execute();
+
+  it("activates a complete business without a register number: decided by the system, fully audited", async () => {
+    const acct = newId("acct");
+    await withTx(s.admin.db, (tx) => createKybCase(tx, acct, "No Register"));
+    const { registration_number: _, ...noRegister } = COMPLETE;
+    const token = await sessionToken(acct, "owner", { stepUp: true });
+    expect((await req("PATCH", "/v1/account/kyb", { body: noRegister, token })).status).toBe(200);
+    const r = await req("POST", "/v1/account/kyb/submit", { body: { declaration: true }, token });
+    expect(r.status).toBe(200);
+    expect(r.body).toMatchObject({ status: "approved", profile: { registration_number: null } });
+
+    expect((await transitions(acct)).slice(-2)).toEqual([
+      {
+        from_state: "not_started",
+        to_state: "pending",
+        cause: "owner_submitted",
+        actor: `user:${OWNER}`,
+        evidence: { declaration: true },
+      },
+      {
+        from_state: "pending",
+        to_state: "approved",
+        cause: "auto_decision",
+        actor: "system",
+        evidence: { reason: "auto-approved: open onboarding (ADR-0024)" },
+      },
+    ]);
+    const ops = await req("GET", `/ops/kyb_cases/${acct}`, { token: await consoleToken(alice, { stepUp: false }) });
+    expect(ops.body).toMatchObject({
+      status: "approved",
+      decided_by: "system",
+      declared_by: OWNER,
+      decision_reason: "auto-approved: open onboarding (ADR-0024)",
+      profile: { registration_number: null },
+    });
+    expect((ops.body.history as { status: string; actor: string }[]).slice(-1)[0]).toMatchObject({
+      status: "approved",
+      actor: "system",
+    });
+    const ev = (await outboxOf(s, "evt.compliance.kyb.approved")).filter((e) => e.aggregate.id === acct);
+    expect(ev[0]?.data.object).toMatchObject({
+      account_id: acct,
+      status: "approved",
+      reason: "auto-approved: open onboarding (ADR-0024)",
+    });
+    // an automatic decision is not an operator action
+    expect(await opsActions(acct)).toHaveLength(0);
+  });
+
+  it("a business in a blocked country is rejected automatically (geo_blocked); live mode never turns on", async () => {
+    for (const [over, reason] of [
+      [{ country_of_incorporation: "IR" }, "auto-rejected: geo_blocked (country of incorporation IR)"],
+      [
+        { business_address: { line1: "1 Main", city: "Pyongyang", country: "KP" } },
+        "auto-rejected: geo_blocked (business address country KP)",
+      ],
+      [
+        { business_address: { line1: "1 Main", city: "Simferopol", region: "UA-43", country: "UA" } },
+        "auto-rejected: geo_blocked (business address region UA-43)",
+      ],
+    ] as const) {
+      const acct = newId("acct");
+      const token = await sessionToken(acct, "owner", { stepUp: true });
+      await req("PATCH", "/v1/account/kyb", { body: { ...COMPLETE, ...over }, token });
+      const r = await req("POST", "/v1/account/kyb/submit", { body: { declaration: true }, token });
+      expect(r.body).toMatchObject({ status: "rejected", editable: false });
+      expect(JSON.stringify(r.body)).not.toContain("geo_blocked"); // internal reason stays off the owner view
+      const ev = (await outboxOf(s, "evt.compliance.kyb.rejected")).filter((e) => e.aggregate.id === acct);
+      expect(ev).toHaveLength(1);
+      expect(ev[0]?.data.object).toMatchObject({ status: "rejected", reason });
+      expect((await outboxOf(s, "evt.compliance.kyb.approved")).filter((e) => e.aggregate.id === acct)).toHaveLength(0);
+      expect((await transitions(acct)).at(-1)).toMatchObject({ to_state: "rejected", actor: "system" });
+    }
+  });
+
+  it("operators can still reject an active business for abuse and reverse it", async () => {
+    const acct = await submittedAccount();
+    const token = await consoleToken(bob);
+    const decide = (body: Record<string, unknown>) => req("POST", `/ops/kyb_cases/${acct}/decision`, { body, token });
+    expect((await decide({ decision: "rejected", reason: "fraud reports" })).body).toMatchObject({
+      status: "rejected",
+      decided_by: bob.sub,
+    });
+    expect((await outboxOf(s, "evt.compliance.kyb.rejected")).filter((e) => e.aggregate.id === acct)).toHaveLength(1);
+    expect((await opsActions(acct)).map((a) => a.data.object.action)).toEqual(["kyb_case.rejected"]);
+    expect((await decide({ decision: "approved", reason: "reports withdrawn" })).body).toMatchObject({
+      status: "approved",
+    });
+  });
+
+  it("manual mode keeps the review; switching back to auto decides what is pending", async () => {
+    s.setKybMode("manual");
+    try {
+      const acct = await submittedAccount();
+      expect((await req("GET", "/v1/account/kyb", { token: await sessionToken(acct) })).body).toMatchObject({
+        status: "pending",
+      });
+      expect(await autoDecidePending(s.compliance)).toEqual({ decided: 0 });
+      s.setKybMode("auto");
+      const r = await autoDecidePending(s.compliance);
+      expect(r.decided).toBeGreaterThanOrEqual(1);
+      expect((await req("GET", "/v1/account/kyb", { token: await sessionToken(acct) })).body).toMatchObject({
+        status: "approved",
+      });
+      expect((await transitions(acct)).at(-1)).toMatchObject({ cause: "auto_decision", actor: "system" });
+    } finally {
+      s.setKybMode("auto");
+    }
+  });
+});
+
+describe("Businesses list and decisions in manual mode (console)", () => {
+  beforeAll(() => s.setKybMode("manual"));
+  afterAll(() => s.setKybMode("auto"));
+
   it("lists pending cases oldest submission first, with cursors", async () => {
     const a = await submittedAccount();
     const b = await submittedAccount();
@@ -272,7 +402,7 @@ describe("KYB queue and decisions (console)", () => {
     expect(JSON.stringify(actions[0])).not.toContain("registry extract");
   });
 
-  it("needs_info carries requested_info to the merchant; rejected cases cannot be approved", async () => {
+  it("needs_info carries requested_info to the merchant; a rejection can be reversed", async () => {
     const acct = await submittedAccount();
     const token = await consoleToken(bob);
     const decide = (body: Record<string, unknown>) => req("POST", `/ops/kyb_cases/${acct}/decision`, { body, token });
@@ -295,7 +425,9 @@ describe("KYB queue and decisions (console)", () => {
     expect((await decide({ decision: "rejected", reason: "fake registry" })).body).toMatchObject({
       status: "rejected",
     });
-    expect((await decide({ decision: "approved", reason: "x" })).status).toBe(409);
+    expect((await decide({ decision: "approved", reason: "registry extract checked" })).body).toMatchObject({
+      status: "approved",
+    });
   });
 
   it("refuses to approve a Stage 1 pending case without declared details", async () => {
