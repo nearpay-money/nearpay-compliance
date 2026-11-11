@@ -6,7 +6,7 @@
  * a business without a register number can still declare itself). `PATCH` semantics: an absent field keeps its value,
  * `null` clears it, an address replaces the stored one as a whole.
  */
-import type { KybProfile as KybProfileSchema, KybProfileUpdate as KybProfileUpdateSchema } from "@nearpay/spec";
+import type { KybProfile as KybProfileSchema, KybProfileUpdate as KybProfileUpdateSchema } from "@nearpay-money/spec";
 import type { z } from "zod";
 
 export type KybProfile = z.output<typeof KybProfileSchema>;

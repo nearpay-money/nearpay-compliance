@@ -6,7 +6,6 @@
  */
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
-import { ErrorEnvelope, getKyb, PUBLIC_ROUTES, startKyb } from "@nearpay/spec";
 import { unhandledSubjects } from "@nearpay-internal/bus";
 import { sql } from "@nearpay-internal/db";
 import { newId } from "@nearpay-internal/ids";
@@ -26,6 +25,7 @@ import {
   SUBJECTS,
   type Subject,
 } from "@nearpay-internal/spec";
+import { ErrorEnvelope, getKyb, PUBLIC_ROUTES, startKyb } from "@nearpay-money/spec";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { complianceRoutes } from "../../src/api/routes.js";
 import { complianceHandlers } from "../../src/consumers/handlers.js";

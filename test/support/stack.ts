@@ -6,7 +6,6 @@
  */
 import { randomBytes } from "node:crypto";
 import { createReadStream } from "node:fs";
-import { OPS_SCOPES } from "@nearpay/spec";
 import { type Bus, connectBus, type Envelope, publish } from "@nearpay-internal/bus";
 import { createDb, type Database, migrate, sql } from "@nearpay-internal/db";
 import { newId } from "@nearpay-internal/ids";
@@ -28,6 +27,7 @@ import {
   testKeySource,
   testServiceToken,
 } from "@nearpay-internal/testing";
+import { OPS_SCOPES } from "@nearpay-money/spec";
 import type { Compliance } from "../../src/app/context.js";
 import { importSanctions } from "../../src/app/sanctions.js";
 import { createApi, createWorker } from "../../src/app/services.js";
