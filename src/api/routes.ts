@@ -3,13 +3,7 @@
  * spec by the bootstrap; console handlers additionally resolve the operator (`operator`) and scope
  * Idempotency-Keys to principals without an account (`withPrincipalIdempotency`).
  */
-import {
-  type AnyRoute,
-  getKyb as getKybRoute,
-  startKyb as startKybRoute,
-  submitKyb as submitKybRoute,
-  updateKybProfile as updateKybProfileRoute,
-} from "@nearpay/spec";
+
 import { ApiError, implement, type RequestContext, type Responded, type RouteBinding } from "@nearpay-internal/service";
 import {
   addOpsBlocklistEntry as addOpsBlocklistEntryRoute,
@@ -35,6 +29,13 @@ import {
   rejectOpsSuspensionRequest,
   removeOpsBlocklistEntry as removeOpsBlocklistEntryRoute,
 } from "@nearpay-internal/spec";
+import {
+  type AnyRoute,
+  getKyb as getKybRoute,
+  startKyb as startKybRoute,
+  submitKyb as submitKybRoute,
+  updateKybProfile as updateKybProfileRoute,
+} from "@nearpay-money/spec";
 import {
   addOpsBlocklistEntry,
   createOpsRescreen,

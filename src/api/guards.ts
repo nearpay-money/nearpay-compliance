@@ -9,9 +9,9 @@
  *   `idempotency_keys` table (same 24 h retention, same replay and conflict rules).
  */
 import { createHash } from "node:crypto";
-import type { AnyRoute } from "@nearpay/spec";
 import { idempotencyStore } from "@nearpay-internal/db";
 import { ApiError, type RequestContext, respond } from "@nearpay-internal/service";
+import type { AnyRoute } from "@nearpay-money/spec";
 import type { Compliance } from "../app/context.js";
 import { checkOperator } from "../domain/ops/principal.js";
 import type { Operator } from "../domain/ops-approval/approval.js";

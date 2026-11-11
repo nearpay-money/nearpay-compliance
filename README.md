@@ -50,13 +50,13 @@ nearpay-compliance/
 
 ## Commands
 
-| Command                                                                                                       | What it does                                                                                                                                        |
-| ------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `pnpm install`                                                                                                | Install (Node 22, pnpm 9); `@nearpay/*` and `@nearpay-internal/*` come from the local registry (`.npmrc`, `nearpay-deploy/scripts/up.sh` starts it) |
-| `pnpm test`                                                                                                   | Unit and property tests                                                                                                                             |
-| `pnpm test:integration`                                                                                       | Integration and contract tests on real Postgres and NATS (Testcontainers; needs Docker)                                                             |
-| `pnpm verify`                                                                                                 | typecheck + lint + unit tests with the coverage gate + integration tests + build                                                                    |
-| `docker build --network host --build-arg NP_REGISTRY_URL=http://127.0.0.1:4873 -t nearpay/compliance:local .` | Image (what `up.sh` runs)                                                                                                                           |
+| Command                                                                                                       | What it does                                                                                                                                              |
+| ------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm install`                                                                                                | Install (Node 22, pnpm 9); `@nearpay-money/*` and `@nearpay-internal/*` come from the local registry (`.npmrc`, `nearpay-deploy/scripts/up.sh` starts it) |
+| `pnpm test`                                                                                                   | Unit and property tests                                                                                                                                   |
+| `pnpm test:integration`                                                                                       | Integration and contract tests on real Postgres and NATS (Testcontainers; needs Docker)                                                                   |
+| `pnpm verify`                                                                                                 | typecheck + lint + unit tests with the coverage gate + integration tests + build                                                                          |
+| `docker build --network host --build-arg NP_REGISTRY_URL=http://127.0.0.1:4873 -t nearpay/compliance:local .` | Image (what `up.sh` runs)                                                                                                                                 |
 
 ## Configuration
 
