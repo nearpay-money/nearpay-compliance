@@ -43,7 +43,8 @@ export interface JobOptions {
 
 /**
  * Screens every active live destination (batches of 200; each block in its own tx). `onBatch` runs
- * before each batch (the job extends its lease there).
+ * before each batch and after every destination (the job extends its lease there, throttled; each extension also
+ * beats the job worker's liveness heartbeat, kit 0.6.0 — 200 fresh screenings can outlast its 180 s budget).
  */
 export async function rescreenDestinations(
   c: Compliance,
@@ -99,22 +100,58 @@ export async function rescreenDestinations(
         }
       });
       screened++;
+      await onBatch();
     }
   }
   return { screened, blocked };
+}
+
+/** At most one `fn` call per `everyMs` (lease extensions from tight loops). */
+export function throttled(fn: () => Promise<void>, everyMs = 30_000, now = Date.now): () => Promise<void> {
+  let last = Number.NEGATIVE_INFINITY;
+  return async () => {
+    const t = now();
+    if (t - last < everyMs) return;
+    last = t;
+    await fn();
+  };
+}
+
+/**
+ * Runs `work` while extending the job's lease every `everyMs` (each extension beats the job worker's liveness
+ * heartbeat, kit 0.6.0). For one long awaited step that is bounded by its own timeout (the sanctions download).
+ */
+export async function keepingLease<T>(
+  ctx: JobContext,
+  seconds: number,
+  work: () => Promise<T>,
+  everyMs = 60_000,
+): Promise<T> {
+  const timer = setInterval(() => void ctx.extendLease(seconds).catch(() => {}), everyMs);
+  try {
+    return await work();
+  } finally {
+    clearInterval(timer);
+  }
 }
 
 export function jobHandlers(c: Compliance, o: JobOptions): Record<string, JobHandler> {
   return {
     "sanctions.refresh": async (_payload, ctx: JobContext) => {
       if (!o.sanctionsRefresh) return;
-      // the download alone may take minutes: hold the lease for the whole timeout
-      await ctx.extendLease(Math.ceil(o.sanctionsTimeoutMs / 1000) + 300);
-      await refreshSanctions(c, o.sanctionsSourceUrl, o.sanctionsTimeoutMs, o.fetch);
+      // the download alone may take minutes (bounded by sanctionsTimeoutMs): hold the lease for the whole timeout and
+      // keep extending it, so the job worker's liveness budget (180 s) never sees the download as a hang
+      const lease = Math.ceil(o.sanctionsTimeoutMs / 1000) + 300;
+      await ctx.extendLease(lease);
+      await keepingLease(ctx, lease, () => refreshSanctions(c, o.sanctionsSourceUrl, o.sanctionsTimeoutMs, o.fetch));
     },
     "destinations.rescreen": async (payload, ctx: JobContext) => {
       const account = (payload as { account_id?: string | null } | null)?.account_id ?? null;
-      const r = await rescreenDestinations(c, () => ctx.extendLease(600), account);
+      const r = await rescreenDestinations(
+        c,
+        throttled(() => ctx.extendLease(600)),
+        account,
+      );
       c.log.info({ ...r, account }, "destinations re-screened");
     },
     "ops_approvals.expire": async () => {
