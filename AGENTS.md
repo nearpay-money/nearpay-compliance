@@ -1,6 +1,6 @@
 # AGENTS.md — nearpay-compliance
 
-You are working in **nearpay-compliance**, one of 27 NearPay repositories (`nearpay-brain/architecture/repositories.md`).
+You are working in **nearpay-compliance**, one of 26 NearPay repositories (`nearpay-brain/architecture/repositories.md`).
 Scope: Address screening, KYB cases, geo policy, compliance cases and blocklists; policies are data per jurisdiction.
 
 ## Before changing anything

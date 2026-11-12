@@ -1,6 +1,11 @@
 # nearpay-compliance
 
-> Address screening, KYB cases, geo policy, compliance cases and blocklists; policies are data per jurisdiction.
+Address screening against the OFAC list and NearPay's blocklist, self-declared business details (KYB cases), geo policy, and compliance cases. Policies are data per jurisdiction.
+
+Part of [NearPay](https://github.com/nearpay-money/nearpay) — start there for the live demo, the architecture diagram and the full "do X, see Y" walkthrough.
+
+- **Where it sits:** internal only. Identity, rails and agentpay call `POST /internal/screenings` before a payout wallet, a refund address or an agent payer is accepted; payments reads the geo policy and opens cases; the ops console calls its `/ops/…` routes; the dashboard's business-details page reaches `/v1/account/kyb` through the gateway. It calls no other NearPay service; its only outbound request is the daily download of the OFAC SDN list.
+- **Status:** NearPay runs on NEAR mainnet as a closed beta (https://nearpay.money). This service is part of that deployment. Onboarding is open (ADR-0024): complete self-declared business details are approved by the system at once, with no business review, and the registration number is optional; the geo policy still blocks, and suspension for abuse stays. Screening is local (OFAC list and blocklist); no screening or KYB vendor is integrated in v1 (ADR-0020).
 
 |                                       |                                                         |
 | ------------------------------------- | ------------------------------------------------------- |
@@ -8,20 +13,20 @@
 | Kind                                  | service                                                 |
 | Ships as                              | image: ghcr.io/nearpay-money/compliance · internal only |
 | Owns                                  | ScreeningResult, KybCase, GeoPolicy, Case, Blocklist    |
-| Depends on (published artifacts only) | spec, kit, screening vendor, KYB vendor                 |
+| Depends on (published artifacts only) | spec, kit; the OFAC SDN list (no vendor in v1)          |
 | First built in                        | Stage 1 (step 1.2)                                      |
 
 ## Documentation
 
-This repo stays surgical: design docs live in [`nearpay-brain`](../nearpay-brain/README.md), not here.
+Design docs live in [`nearpay-brain`](https://github.com/nearpay-money/nearpay-brain), not here.
 
-- `nearpay-brain/lld/compliance.md` — **low-level design (dev-ready; implement from this)**
-- `nearpay-brain/lld/audits/compliance.md` — audit findings already folded into the LLD
-- `nearpay-brain/roadmap/development-plan.md` — stage and step this repo is built in
-- `nearpay-brain/architecture/hld.md` — system design
-- `nearpay-brain/architecture/repositories.md` — repo topology and dependency rules
-- `nearpay-brain/architecture/hld.md#13-compliance-architecture-summary`
-- `nearpay-brain/architecture/security.md`
+- [`lld/compliance.md`](https://github.com/nearpay-money/nearpay-brain/blob/main/lld/compliance.md) — low-level design this repo is implemented from
+- [`lld/audits/compliance.md`](https://github.com/nearpay-money/nearpay-brain/blob/main/lld/audits/compliance.md) — audit findings already folded into the LLD
+- [`roadmap/development-plan.md`](https://github.com/nearpay-money/nearpay-brain/blob/main/roadmap/development-plan.md) — stage and step this repo is built in
+- [`architecture/hld.md`](https://github.com/nearpay-money/nearpay-brain/blob/main/architecture/hld.md) — system design
+- [`architecture/repositories.md`](https://github.com/nearpay-money/nearpay-brain/blob/main/architecture/repositories.md) — repo topology and dependency rules
+- [`architecture/hld.md#13-compliance-architecture-summary`](https://github.com/nearpay-money/nearpay-brain/blob/main/architecture/hld.md#13-compliance-architecture-summary)
+- [`architecture/security.md`](https://github.com/nearpay-money/nearpay-brain/blob/main/architecture/security.md)
 
 ## Layout
 
@@ -48,15 +53,26 @@ nearpay-compliance/
 └── Dockerfile                distroless Node 22 image, `node dist/main.js <process>`
 ```
 
+## Verify this repo
+
+Needs Node 22 (`.nvmrc`) and pnpm 9. `.npmrc` points the `@nearpay-money` and `@nearpay-internal` scopes at a local package registry, so start that first.
+
+1. Start the local registry (no Docker, Node 22 only):
+   `git clone https://github.com/nearpay-money/nearpay-deploy ../nearpay-deploy && ../nearpay-deploy/scripts/registry.sh start`
+   → `curl http://127.0.0.1:4873/-/ping` answers `{}`.
+2. `pnpm install --frozen-lockfile` → ends with `Done in …`, no registry errors.
+3. `pnpm test` (unit and property tests: subject normalisation, the screening decision, the OFAC parser on a recorded and redacted list, KYB and case rules; no Docker) → `Test Files  12 passed (12)`, `Tests  115 passed (115)`.
+4. `pnpm verify` (the full gate: typecheck, lint, unit tests with the coverage gate of ≥ 90 % branches on `src/domain`, integration tests, build) → exits 0. The integration and contract tests run on real Postgres and NATS started by Testcontainers, so this step needs a running Docker daemon; steps 1–3 do not.
+
 ## Commands
 
-| Command                                                                                                       | What it does                                                                                                                                              |
-| ------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `pnpm install`                                                                                                | Install (Node 22, pnpm 9); `@nearpay-money/*` and `@nearpay-internal/*` come from the local registry (`.npmrc`, `nearpay-deploy/scripts/up.sh` starts it) |
-| `pnpm test`                                                                                                   | Unit and property tests                                                                                                                                   |
-| `pnpm test:integration`                                                                                       | Integration and contract tests on real Postgres and NATS (Testcontainers; needs Docker)                                                                   |
-| `pnpm verify`                                                                                                 | typecheck + lint + unit tests with the coverage gate + integration tests + build                                                                          |
-| `docker build --network host --build-arg NP_REGISTRY_URL=http://127.0.0.1:4873 -t nearpay/compliance:local .` | Image (what `up.sh` runs)                                                                                                                                 |
+| Command                                                                                                       | What it does                                                                                      |
+| ------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
+| `pnpm install --frozen-lockfile`                                                                              | Install (Node 22, pnpm 9); NearPay packages come from the local registry (see "Verify this repo") |
+| `pnpm test`                                                                                                   | Unit and property tests                                                                           |
+| `pnpm test:integration`                                                                                       | Integration and contract tests on real Postgres and NATS (Testcontainers; needs Docker)           |
+| `pnpm verify`                                                                                                 | typecheck + lint + unit tests with the coverage gate + integration tests + build                  |
+| `docker build --network host --build-arg NP_REGISTRY_URL=http://127.0.0.1:4873 -t nearpay/compliance:local .` | Image (what nearpay-deploy's `scripts/up.sh` runs)                                                |
 
 ## Configuration
 
@@ -85,9 +101,9 @@ nearpay-compliance/
 - **Destinations**: activations are monitored; a blocklist entry or the daily re-screen blocks a matching live destination (`destination.blocked`, identity disables it).
 - **Geo policy** (`GET /internal/geo-policy`, scope `compliance.read`): blocked countries and regions are data; `geo-policy-set` emits `policy.updated` (payments refreshes).
 
-## Ops CLI (Stage 1)
+## Ops CLI
 
-There is no network path to these actions in Stage 1 (Stage 2 moves them to the console). Run inside the api container:
+Since Stage 2 the ops console (`/ops/…`) covers these actions; the CLI remains for local stacks and drills. Run inside the api container:
 
 ```sh
 docker compose exec compliance-api /nodejs/bin/node dist/ops.js kyb-decide acct_… approved --reason "registry extract checked" --actor alice
@@ -97,10 +113,17 @@ docker compose exec compliance-api /nodejs/bin/node dist/ops.js kyb-decide acct_
 
 ## Status
 
-Stage 2 (step 2.2) implemented against `@nearpay*/spec` 0.2.0 and kit 0.2.0: self-declared KYB profile (`getKyb`, `updateKybProfile`, `submitKyb`, `getInternalKybCase`), payments' `createInternalCase`, every console route (`/ops/…`: KYB queue and decisions, cases, blocklist, screening and re-screening, merchant suspension with the two-person rule), operator actions (`evt.compliance.ops_action.recorded`), the `local` screening provider behind a provider port, and `Review.payment_intent`. Design: `nearpay-brain/lld/compliance.md` v1.6.
+Stage 2 (step 2.2) implemented against `@nearpay*/spec` 0.2.0 and kit 0.2.0: self-declared KYB profile (`getKyb`, `updateKybProfile`, `submitKyb`, `getInternalKybCase`), payments' `createInternalCase`, every console route (`/ops/…`: KYB queue and decisions, cases, blocklist, screening and re-screening, merchant suspension with the two-person rule), operator actions (`evt.compliance.ops_action.recorded`), the `local` screening provider behind a provider port, and `Review.payment_intent`. Design: [`lld/compliance.md`](https://github.com/nearpay-money/nearpay-brain/blob/main/lld/compliance.md).
 
-Stage 1 (step 1.2) implemented: every Stage-1 compliance route and consumed subject of `@nearpay-internal/spec` 0.1.2, the OFAC list (SP-15), post-screening, cases and reviews, manual KYB, blocklist, geo policy, destination re-screening and the ops CLI. Compliance makes no outbound calls to other NearPay services, so it needs no peer mocks. Vendor screening and the KYB vendor (hosted flow, `POST /webhooks/kyb/{vendor}`) are Stage 2.
+Stage 1 (step 1.2) implemented: every Stage-1 compliance route and consumed subject of `@nearpay-internal/spec` 0.1.2, the OFAC list (SP-15), post-screening, cases and reviews, manual KYB, blocklist, geo policy, destination re-screening and the ops CLI. Compliance makes no outbound calls to other NearPay services, so it needs no peer mocks. Vendor screening and a KYB vendor (hosted flow, `POST /webhooks/kyb/{vendor}`) are not built; they are post-v1 (ADR-0020).
+
+Since then: open onboarding (`NP_KYB_MODE=auto` by default, ADR-0024) and kit 0.6.0. Current pins (`package.json`): `@nearpay-money/spec` 0.5.0, kit packages 0.6.0.
 
 ## Built with
 
-TypeScript 5, Node 22, `@nearpay-internal/*` kit (service, db, bus, chains, ids), `sax` (streaming XML), Kysely + pg, NATS JetStream; tests with Vitest, fast-check and Testcontainers. Code and documentation are written with AI assistance (Claude) under human direction and review.
+- Runtime: TypeScript 5 on Node 22; `@nearpay-internal/*` kit (service, db, bus, auth, http, chains, ids) with Fastify, Kysely + pg and NATS JetStream underneath; `sax` (streaming XML), `prom-client`, `zod`.
+- External data: the OFAC SDN advanced XML published by the US Treasury's Sanctions List Service.
+- Tests and tooling: Vitest, fast-check, Testcontainers, Biome.
+- Licence: Apache-2.0 (`LICENSE`).
+
+Code and documentation are written with AI assistance (Claude) under human direction and review. Built for the NEAR Hackathon (Nov 2026).
